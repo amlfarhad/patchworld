@@ -115,3 +115,6 @@ input { min-width: 0; outline: none; }
 }
 @media (max-height: 600px) { .pixel-scene { display: none; }.hero-copy { margin-bottom: 16px; }.hero-copy h1 { font-size: 35px; }.hero-copy p,.hero-copy > .micro-label { display: none; }.prompt-position { bottom: 18%; }.prompt-compact { bottom: 155px; }.status-ticker { min-height: 46px; }.pip-panel { top: 106px; } }
 @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+
+/* Mock mode: the daemon replays a scripted run, so say so wherever a screenshot could be taken. */
+.mock-badge { font: 8px var(--font-mono); letter-spacing: .06em; color: #775737; background: #ffe4ba; border: 1px solid #a87345; border-radius: 3px; padding: 4px 7px; }

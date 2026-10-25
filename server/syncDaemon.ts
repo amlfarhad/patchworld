@@ -246,7 +246,7 @@ async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestP
     return
   }
   try {
-    emitProgress({ phase: 'critiquing', message: 'Managed Agent sandbox is reviewing the video and frame telemetry.', iteration })
+    emitProgress({ phase: 'critiquing', message: mockScript ? 'Mock mode: replaying the scripted critique (no video is analyzed).' : 'Managed Agent sandbox is reviewing the video and frame telemetry.', iteration })
     const currentFiles = await readCurrentGeneratedFiles()
     const patch = await createOrchestrator(epoch).critiqueAndPatchWorld({
       videoBytes: packet.videoBytes,
@@ -271,8 +271,12 @@ async function handleMountFailure(error: string, stack?: string): Promise<void> 
   sendToRole('agent', { type: 'level-mount-failed', error, stack })
   const wasAwaiting = awaitingLevelMount
   awaitingLevelMount = false
+  if (!wasAwaiting) {
+    // Not a patch the loop is waiting on: a crash after Reset level (show it), or a duplicate report during a repair (ignore it).
+    if (!activeGoal) emitProgress({ phase: 'error', message: `The level threw while loading: ${error}`, iteration })
+    return
+  }
   settleLatestIteration('mount-failed', { failureReason: error })
-  if (!wasAwaiting) return
   if (!activeGoal) {
     emitProgress({ phase: 'error', message: `Generated level failed to load: ${error}`, iteration })
     return
@@ -559,7 +563,7 @@ websocketServer.on('connection', (socket) => {
         }
         record = { socket, role: message.role }
         clients.add(record)
-        sendJson(socket, { type: 'registered', role: record.role })
+        sendJson(socket, { type: 'registered', role: record.role, mock: Boolean(mockScript) })
         if (record.role === 'browser') {
           void publishSkill(socket)
           if (history.length > 0) publishHistory(socket)

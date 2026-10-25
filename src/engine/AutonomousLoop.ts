@@ -160,7 +160,7 @@ export class AutonomousLoop {
       this.setState('error')
       window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: message.message }))
     } else if (message.type === 'registered') {
-      window.dispatchEvent(new CustomEvent('argon:connection', { detail: true }))
+      window.dispatchEvent(new CustomEvent('argon:connection', { detail: { connected: true, mock: Boolean(message.mock) } }))
       if (this.unreportedMount) {
         this.unreportedMount = false
         this.send({ type: 'level-mounted' })
