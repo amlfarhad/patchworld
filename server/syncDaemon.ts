@@ -149,7 +149,7 @@ async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = 
   await writeBatch(safeFiles)
   const paths = safeFiles.map(({ path }) => path)
   sendToRole('agent', { type: 'patch-applied', runId, files: paths })
-  sendToRole('browser', { type: 'patch-applied', runId, files: paths, iteration, changes })
+  sendToRole('browser', { type: 'patch-applied', runId, files: paths, iteration: iteration + 1, changes })
   return safeFiles
 }
 
@@ -275,7 +275,7 @@ async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestP
     return
   }
   try {
-    emitProgress({ phase: 'critiquing', message: 'Managed Agent sandbox is reviewing the video and frame telemetry.', iteration })
+    emitProgress({ phase: 'critiquing', message: mockScript ? 'Mock critic is replaying a scripted review.' : 'The critic is reviewing the video and frame telemetry.', iteration })
     const currentFiles = await readCurrentGeneratedFiles()
     const patch = await createOrchestrator(epoch).critiqueAndPatchWorld({
       videoBytes: packet.videoBytes,
@@ -589,7 +589,7 @@ websocketServer.on('connection', (socket) => {
         }
         record = { socket, role: message.role }
         clients.add(record)
-        sendJson(socket, { type: 'registered', role: record.role })
+        sendJson(socket, { type: 'registered', role: record.role, mock: Boolean(mockScript) })
         if (record.role === 'browser') {
           void publishSkill(socket)
           if (history.length > 0) publishHistory(socket)

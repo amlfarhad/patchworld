@@ -37,7 +37,7 @@ export interface FileChange {
 }
 
 export type DaemonMessage =
-  | { type: 'registered'; role: 'browser' | 'agent' }
+  | { type: 'registered'; role: 'browser' | 'agent'; mock?: boolean }
   | { type: 'progress'; phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
   | { type: 'video-preview'; runId: string; videoUrl: string }
   | { type: 'start-goal-accepted'; goal: string }

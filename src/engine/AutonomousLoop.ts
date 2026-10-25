@@ -11,6 +11,8 @@ export class AutonomousLoop {
   private state: LoopState = 'idle'
   private runGeneration = 0
   private humanTicks = 0
+  /** Reported once per mounted level, so the win banner does not flicker. */
+  private humanWon = false
   private runId = ''
   private frameLimit = 240
   private runTicks = 0
@@ -65,6 +67,8 @@ export class AutonomousLoop {
   }
 
   onLevelMounted(): void {
+    this.humanWon = false
+    this.humanTicks = 0
     this.unreportedMount = !this.send({ type: 'level-mounted' })
     if (this.enabled && this.state === 'awaiting-patch') this.beginRun()
     else if (this.enabled && this.state === 'uploading') this.mountedWhileUploading = true
@@ -125,6 +129,10 @@ export class AutonomousLoop {
     namedBodies: Map<string, RAPIER.RigidBody>,
     contacts: ContactSnapshot[],
   ): void {
+    if (this.state === 'human' && result?.goalReached && !this.humanWon) {
+      this.humanWon = true
+      window.dispatchEvent(new CustomEvent('argon:human-won', { detail: true }))
+    }
     if (this.state !== 'running' || !result) return
     this.runTicks += 1
     const shouldCapture = this.runTicks % 2 === 0 || result.goalReached || Boolean(result.failedEarly)
@@ -162,7 +170,7 @@ export class AutonomousLoop {
       this.setState('error')
       window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: message.message }))
     } else if (message.type === 'registered') {
-      window.dispatchEvent(new CustomEvent('argon:connection', { detail: true }))
+      window.dispatchEvent(new CustomEvent('argon:connection', { detail: { connected: true, mock: message.mock === true } }))
       if (this.unreportedMount) {
         this.unreportedMount = false
         this.send({ type: 'level-mounted' })
