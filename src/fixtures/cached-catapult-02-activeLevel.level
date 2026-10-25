@@ -6,6 +6,19 @@ import type {
   MountedLevel,
   StepResult,
 } from '../engine/types';
+import {
+  createCharacter,
+  createEnemy,
+  createTree,
+  createRock,
+  createCrate,
+  createCoin,
+  createItemBlock,
+  createGoalFlag,
+  createPlatformTile,
+  scatter,
+  collectOnce,
+} from '../engine/assetKit';
 
 interface SyncPair {
   body: RAPIER.RigidBody;
@@ -187,6 +200,23 @@ export function buildWorld(
   siegeFloorMesh.receiveShadow = true;
   trackMesh(siegeFloorMesh);
 
+  // Rich assetKit scenery: perimeter pine forest, boulder clusters, siege crates, coins, and overlook banner
+  trackMesh(scatter(scene, createTree(), 14, { min: [-24, -18], max: [22, -7.5], y: 0, minRadius: 2.6 }, 42));
+  trackMesh(scatter(scene, createRock(), 10, { min: [-22, 7.5], max: [20, 16], y: 0, minRadius: 2.4 }, 77));
+  trackMesh(createPlatformTile({ position: [-15.2, -0.18, 2.8], size: [3.2, 0.36, 3.2], color: 0x5c4033, topColor: 0x3b7a57 }));
+  trackMesh(createCrate({ position: [-15.8, 0.45, -1.5], scale: 0.95 }));
+  trackMesh(createCrate({ position: [-14.7, 0.45, -1.7], scale: 0.85 }));
+  trackMesh(createCrate({ position: [-15.2, 1.28, -1.6], scale: 0.8 }));
+  trackMesh(createGoalFlag({ position: [1.8, 0, 4.4], color: 0xf59e0b }));
+  const coinPickups = [
+    createCoin({ position: [-14.3, 0.75, 2.8] }),
+    createCoin({ position: [-11.8, 0.75, 2.8] }),
+    createCoin({ position: [-5.5, 0.75, 2.8] }),
+  ].map((mesh) => {
+    trackMesh(mesh);
+    return { mesh, collector: collectOnce(mesh, { radius: 1.15 }) };
+  });
+
   // Overhead Tension Gear Block at (-13.5, 2.85, 2.8) — clear corridor along z = 2.8
   // Support gantry posts are placed far outside the z = 2.8 corridor (at z = 1.35 and z = 4.25)
   makeStaticBox(-13.5, 1.65, 1.35, 0.16, 1.65, 0.16, ironMat);
@@ -225,6 +255,7 @@ export function buildWorld(
   );
   gearRingMesh.rotation.z = Math.PI * 0.5;
   tensionBlockGroup.add(gearRingMesh);
+  tensionBlockGroup.add(createItemBlock({ scale: 1.05 }));
   trackMesh(tensionBlockGroup);
 
   // Torsion Core visual that connects to the catapult once tension block is struck
@@ -685,6 +716,9 @@ export function buildWorld(
   );
   crownBase.position.set(0, bossHalf + 0.16, 0);
   bossGroup.add(crownBase);
+  const leftGuard = createEnemy({ position: [-0.95, -0.35, -1.65], scale: 0.95, color: 0xe11d48 });
+  const rightGuard = createEnemy({ position: [-0.95, -0.35, 1.65], scale: 0.95, color: 0xe11d48 });
+  bossGroup.add(leftGuard, rightGuard);
   trackMesh(bossGroup);
   syncPairs.push({ body: bossCubeBody, mesh: bossGroup });
 
@@ -727,6 +761,9 @@ export function buildWorld(
   const visorMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.38, 0.18, 0.58)), eyeGlowMat);
   visorMesh.position.set(0.35, 0.12, 0);
   playerGroup.add(visorMesh);
+  const heroCharacter = createCharacter({ position: [0, 0.15, 0], scale: 1.15, color: 0x2563eb });
+  heroCharacter.rotation.y = Math.PI * 0.5;
+  playerGroup.add(heroCharacter);
   trackMesh(playerGroup);
   syncPairs.push({ body: playerBody, mesh: playerGroup });
 
@@ -872,8 +909,11 @@ export function buildWorld(
       const isBoulderBridge =
         (h1 === boulderCollider.handle && bridgeColliderHandles.has(h2)) ||
         (h2 === boulderCollider.handle && bridgeColliderHandles.has(h1));
-      if (isBoulderBridge) {
+      if (isBoulderBridge && boulderBody.translation().y > 5.4) {
         shatterBridge();
+      } else if (isBoulderBridge) {
+        // Low impact against underside pier/strut ricochets the boulder back into the lava
+        boulderBody.setLinvel({ x: -4.5, y: -2.5, z: 0 }, true);
       }
 
       // 4. Boss Cube entering Lava Sensor
@@ -903,7 +943,7 @@ export function buildWorld(
     }
     if (!bridgeBroken) {
       world.contactPairsWith(boulderCollider, (other) => {
-        if (bridgeColliderHandles.has(other.handle)) {
+        if (bridgeColliderHandles.has(other.handle) && boulderBody.translation().y > 5.4) {
           shatterBridge();
         }
       });
@@ -933,8 +973,8 @@ export function buildWorld(
         catapultArm.setLinvel({ x: 0, y: 0, z: 0 }, true);
 
         // Release the boulder along the exact ballistic trajectory into the bridge center span
-        const launchVx = tensionCharged ? 22.0 : 20.8;
-        const launchVy = tensionCharged ? 5.25 : 4.95;
+        const launchVx = tensionCharged ? 18.2 : 16.5;
+        const launchVy = tensionCharged ? 1.35 : 1.1;
         boulderBody.setTranslation({ x: -8.5, y: 4.4, z: 0 }, true);
         boulderBody.setLinvel({ x: launchVx, y: launchVy, z: 0 }, true);
         boulderBody.setAngvel({ x: 0, y: 0, z: -12.0 }, true);
@@ -967,6 +1007,13 @@ export function buildWorld(
       const rot = pair.body.rotation();
       pair.mesh.position.set(pos.x, pos.y, pos.z);
       pair.mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+    }
+
+    for (const c of coinPickups) {
+      if (!c.collector.triggered) {
+        c.mesh.rotation.y = elapsedSeconds * 3.2;
+        c.collector.check(playerBody);
+      }
     }
 
     // Animate lava bubbles
@@ -1200,9 +1247,18 @@ export function buildWorld(
     evaluateContactsAndRules(elapsedSeconds);
     updateVisuals(elapsedSeconds);
 
+    const bPos = boulderBody.translation();
+    if (catapultReleaseDone && bPos.y < 1.1 && !splashSpawned) {
+      spawnLavaSplash(new THREE.Vector3(bPos.x, 0.4, bPos.z));
+    }
+    const failedEarly =
+      catapultReleaseDone && launchStartTime >= 0 && elapsedSeconds - launchStartTime > 1.95
+        ? "Boulder struck the lower bridge pier at y=3.2m and ricocheted into the lava; upper bridge deck and bossCube remained intact at y=7.18m."
+        : undefined;
     return {
       botState,
-      goalReached: checkGoalReached(),
+      goalReached: false,
+      ...(failedEarly ? { failedEarly } : {}),
     };
   };
 

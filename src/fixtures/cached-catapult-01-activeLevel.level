@@ -6,6 +6,19 @@ import type {
   MountedLevel,
   StepResult,
 } from '../engine/types';
+import {
+  createCharacter,
+  createEnemy,
+  createTree,
+  createRock,
+  createCrate,
+  createCoin,
+  createItemBlock,
+  createGoalFlag,
+  createPlatformTile,
+  scatter,
+  collectOnce,
+} from '../engine/assetKit';
 
 interface SyncPair {
   body: RAPIER.RigidBody;
@@ -178,22 +191,48 @@ export function buildWorld(
   // ============================================================================
   // 1. SIEGE PLATFORM & TENSION UPGRADE BLOCK (West Side: x = -15..-5)
   // ============================================================================
-  // Stone siege foundation pads
-  makeStaticBox(-9.5, 0.15, 0, 4.8, 0.15, 3.2, stoneMat);
-  makeStaticBox(-13.5, 0.15, 2.5, 2.0, 0.15, 2.8, stoneMat);
+  // Flush stone paving under the catapult and player runway (visual only so floor is 100% smooth)
+  const siegeFloorMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(11.5, 0.06, 7.2)),
+    stoneMat,
+  );
+  siegeFloorMesh.position.set(-10.8, 0.03, 1.4);
+  siegeFloorMesh.receiveShadow = true;
+  trackMesh(siegeFloorMesh);
 
-  // Support posts for the overhead Tension Gear Block
-  makeStaticBox(-13.5, 1.9, 1.2, 0.18, 1.9, 0.18, ironMat);
-  makeStaticBox(-13.5, 1.9, 3.8, 0.18, 1.9, 0.18, ironMat);
+  // Rich assetKit scenery: perimeter pine forest, boulder clusters, siege crates, coins, and overlook banner
+  trackMesh(scatter(scene, createTree(), 14, { min: [-24, -18], max: [22, -7.5], y: 0, minRadius: 2.6 }, 42));
+  trackMesh(scatter(scene, createRock(), 10, { min: [-22, 7.5], max: [20, 16], y: 0, minRadius: 2.4 }, 77));
+  trackMesh(createPlatformTile({ position: [-15.2, -0.18, 2.8], size: [3.2, 0.36, 3.2], color: 0x5c4033, topColor: 0x3b7a57 }));
+  trackMesh(createCrate({ position: [-15.8, 0.45, -1.5], scale: 0.95 }));
+  trackMesh(createCrate({ position: [-14.7, 0.45, -1.7], scale: 0.85 }));
+  trackMesh(createCrate({ position: [-15.2, 1.28, -1.6], scale: 0.8 }));
+  trackMesh(createGoalFlag({ position: [1.8, 0, 4.4], color: 0xf59e0b }));
+  const coinPickups = [
+    createCoin({ position: [-14.3, 0.75, 2.8] }),
+    createCoin({ position: [-11.8, 0.75, 2.8] }),
+    createCoin({ position: [-5.5, 0.75, 2.8] }),
+  ].map((mesh) => {
+    trackMesh(mesh);
+    return { mesh, collector: collectOnce(mesh, { radius: 1.15 }) };
+  });
 
-  // Overhead Tension Gear Block (Hit from below to supercharge catapult torsion)
-  const tensionBlockPos = new THREE.Vector3(-13.5, 3.35, 2.5);
+  // Overhead Tension Gear Block at (-13.5, 2.85, 2.8) — clear corridor along z = 2.8
+  // Support gantry posts are placed far outside the z = 2.8 corridor (at z = 1.35 and z = 4.25)
+  makeStaticBox(-13.5, 1.65, 1.35, 0.16, 1.65, 0.16, ironMat);
+  makeStaticBox(-13.5, 1.65, 4.25, 0.16, 1.65, 0.16, ironMat);
+
+  const tensionBlockPos = new THREE.Vector3(-13.5, 2.85, 2.8);
   const tensionBlockBody = createBody(
-    RAPIER.RigidBodyDesc.fixed().setTranslation(tensionBlockPos.x, tensionBlockPos.y, tensionBlockPos.z),
+    RAPIER.RigidBodyDesc.fixed().setTranslation(
+      tensionBlockPos.x,
+      tensionBlockPos.y,
+      tensionBlockPos.z,
+    ),
     'tensionBlock',
   );
   const tensionBlockCollider = world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.75, 0.45, 0.75)
+    RAPIER.ColliderDesc.cuboid(0.85, 0.45, 0.85)
       .setFriction(0.5)
       .setRestitution(0.2)
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
@@ -202,7 +241,7 @@ export function buildWorld(
   const tensionBlockGroup = new THREE.Group();
   tensionBlockGroup.position.copy(tensionBlockPos);
   const tensionBlockMesh = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(1.5, 0.9, 1.5)),
+    trackGeo(new THREE.BoxGeometry(1.7, 0.9, 1.7)),
     goldMat,
   );
   tensionBlockMesh.castShadow = true;
@@ -211,11 +250,12 @@ export function buildWorld(
 
   // Decorative gear ring around the tension block
   const gearRingMesh = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(0.88, 0.88, 0.35, 12)),
+    trackGeo(new THREE.CylinderGeometry(0.95, 0.95, 0.35, 12)),
     ironMat,
   );
   gearRingMesh.rotation.z = Math.PI * 0.5;
   tensionBlockGroup.add(gearRingMesh);
+  tensionBlockGroup.add(createItemBlock({ scale: 1.05 }));
   trackMesh(tensionBlockGroup);
 
   // Torsion Core visual that connects to the catapult once tension block is struck
@@ -229,25 +269,32 @@ export function buildWorld(
   trackMesh(torsionCoreMesh);
 
   // ============================================================================
-  // 2. LAUNCH TRIGGER PEDAL (Stomp from above at x = -10.0, z = 3.0)
+  // 2. LAUNCH TRIGGER PEDAL (Aligned at x = -10.2, z = 2.8 for a direct run)
   // ============================================================================
-  makeStaticBox(-10.0, 0.16, 3.0, 1.15, 0.16, 1.15, ironMat);
+  const pedalBaseVisual = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(2.2, 0.1, 2.2)),
+    ironMat,
+  );
+  pedalBaseVisual.position.set(-10.2, 0.05, 2.8);
+  pedalBaseVisual.receiveShadow = true;
+  trackMesh(pedalBaseVisual);
+
   const pedalBody = createBody(
-    RAPIER.RigidBodyDesc.fixed().setTranslation(-10.0, 0.42, 3.0),
+    RAPIER.RigidBodyDesc.fixed().setTranslation(-10.2, 0.22, 2.8),
     'launchPedal',
   );
   const pedalCollider = world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.85, 0.18, 0.85)
+    RAPIER.ColliderDesc.cuboid(0.95, 0.2, 0.95)
       .setFriction(0.8)
       .setRestitution(0.05)
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
     pedalBody,
   );
   const pedalMesh = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(1.7, 0.36, 1.7)),
+    trackGeo(new THREE.BoxGeometry(1.9, 0.4, 1.9)),
     pedalReadyMat,
   );
-  pedalMesh.position.set(-10.0, 0.42, 3.0);
+  pedalMesh.position.set(-10.2, 0.22, 2.8);
   pedalMesh.castShadow = true;
   pedalMesh.receiveShadow = true;
   trackMesh(pedalMesh);
@@ -317,6 +364,7 @@ export function buildWorld(
   trackMesh(catapultFrameGroup);
 
   // Dynamic Catapult Arm hinged at (-8.5, 2.0, 0)
+  // Single non-overlapping beam collider so the boulder sits cleanly on top without penetration
   const catapultArm = createBody(
     RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(-8.5, 2.0, 0)
@@ -325,39 +373,17 @@ export function buildWorld(
       .setCanSleep(false),
     'catapultArm',
   );
-  // Main throwing beam collider
   world.createCollider(
-    RAPIER.ColliderDesc.cuboid(2.6, 0.18, 0.42)
+    RAPIER.ColliderDesc.cuboid(2.6, 0.16, 0.42)
       .setTranslation(-1.2, 0, 0)
       .setDensity(4.0)
       .setFriction(0.6),
     catapultArm,
   );
-  // Bucket back lip collider to cradle the boulder before launch
-  world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.18, 0.42, 0.68)
-      .setTranslation(-3.95, 0.38, 0)
-      .setDensity(2.5)
-      .setFriction(0.3),
-    catapultArm,
-  );
-  // Bucket side guards
-  world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.65, 0.32, 0.14)
-      .setTranslation(-3.3, 0.32, -0.68)
-      .setDensity(2.0),
-    catapultArm,
-  );
-  world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.65, 0.32, 0.14)
-      .setTranslation(-3.3, 0.32, 0.68)
-      .setDensity(2.0),
-    catapultArm,
-  );
 
   const armVisualGroup = new THREE.Group();
   const armBeamMesh = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(5.6, 0.36, 0.76)),
+    trackGeo(new THREE.BoxGeometry(5.6, 0.32, 0.76)),
     woodLightMat,
   );
   armBeamMesh.position.set(-1.1, 0, 0);
@@ -366,17 +392,17 @@ export function buildWorld(
   armVisualGroup.add(armBeamMesh);
 
   const cupFloorMesh = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(1.5, 0.22, 1.5)),
+    trackGeo(new THREE.BoxGeometry(1.5, 0.18, 1.5)),
     ironMat,
   );
-  cupFloorMesh.position.set(-3.3, 0.16, 0);
+  cupFloorMesh.position.set(-3.2, 0.12, 0);
   armVisualGroup.add(cupFloorMesh);
 
   const cupBackMesh = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(0.28, 0.75, 1.5)),
+    trackGeo(new THREE.BoxGeometry(0.24, 0.65, 1.5)),
     ironMat,
   );
-  cupBackMesh.position.set(-3.95, 0.46, 0);
+  cupBackMesh.position.set(-3.88, 0.42, 0);
   armVisualGroup.add(cupBackMesh);
 
   const counterweightMesh = new THREE.Mesh(
@@ -413,11 +439,11 @@ export function buildWorld(
   );
   createdJoints.push(armLatchJoint);
 
-  // The Siege Boulder resting in the catapult cradle at (-11.75, 3.05, 0)
-  const boulderRadius = 0.86;
+  // The Siege Boulder resting in the catapult cradle at (-11.7, 3.04, 0)
+  const boulderRadius = 0.82;
   const boulderBody = createBody(
     RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(-11.75, 3.05, 0)
+      .setTranslation(-11.7, 3.04, 0)
       .setCcdEnabled(true)
       .setLinearDamping(0.02)
       .setAngularDamping(0.05)
@@ -432,6 +458,22 @@ export function buildWorld(
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
     boulderBody,
   );
+
+  // Cradle Latch Joint holds the boulder securely in the cup until the arm swings up to release
+  const boulderLatchData = RAPIER.JointData.fixed(
+    { x: -3.2, y: 1.04, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+  );
+  let boulderLatchJoint: RAPIER.ImpulseJoint | null = world.createImpulseJoint(
+    boulderLatchData,
+    catapultArm,
+    boulderBody,
+    true,
+  );
+  createdJoints.push(boulderLatchJoint);
+
   const boulderGroup = new THREE.Group();
   const boulderMesh = new THREE.Mesh(
     trackGeo(new THREE.DodecahedronGeometry(boulderRadius, 1)),
@@ -496,7 +538,7 @@ export function buildWorld(
 
   // North & South Stone Bridge Towers (Piers)
   const northPier = makeStaticBox(8.5, 3.0, -6.0, 1.6, 3.0, 1.1, stoneMat, 'northPier');
-  const southPier = makeStaticBox(8.5, 3.0, 6.0, 1.6, 3.0, 1.1, stoneMat, 'southPier');
+  makeStaticBox(8.5, 3.0, 6.0, 1.6, 3.0, 1.1, stoneMat, 'southPier');
 
   // Reachable Stone Staircase leading up to the South Bridge Pier (x = 1.5..6.5, z = 6.0)
   makeStaticBox(1.8, 0.6, 6.0, 0.8, 0.6, 1.0, stoneMat);
@@ -674,25 +716,28 @@ export function buildWorld(
   );
   crownBase.position.set(0, bossHalf + 0.16, 0);
   bossGroup.add(crownBase);
+  const leftGuard = createEnemy({ position: [-0.95, -0.35, -1.65], scale: 0.95, color: 0xe11d48 });
+  const rightGuard = createEnemy({ position: [-0.95, -0.35, 1.65], scale: 0.95, color: 0xe11d48 });
+  bossGroup.add(leftGuard, rightGuard);
   trackMesh(bossGroup);
   syncPairs.push({ body: bossCubeBody, mesh: bossGroup });
 
   // ============================================================================
-  // 5. PLAYER / BOT SIEGE ENGINEER (Starts at x = -13.5, y = 0.85, z = 4.6)
+  // 5. PLAYER / BOT SIEGE ENGINEER (Starts at x = -15.2, y = 0.65, z = 2.8)
   // ============================================================================
   const playerRadius = 0.62;
   const playerBody = createBody(
     RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(-13.5, 0.85, 4.6)
+      .setTranslation(-15.2, 0.65, 2.8)
       .lockRotations()
-      .setLinearDamping(1.8)
+      .setLinearDamping(1.2)
       .setCanSleep(false),
     'player',
   );
   const playerCollider = world.createCollider(
     RAPIER.ColliderDesc.ball(playerRadius)
       .setDensity(2.2)
-      .setFriction(0.2)
+      .setFriction(0.15)
       .setRestitution(0.05)
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
     playerBody,
@@ -716,6 +761,9 @@ export function buildWorld(
   const visorMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.38, 0.18, 0.58)), eyeGlowMat);
   visorMesh.position.set(0.35, 0.12, 0);
   playerGroup.add(visorMesh);
+  const heroCharacter = createCharacter({ position: [0, 0.15, 0], scale: 1.15, color: 0x2563eb });
+  heroCharacter.rotation.y = Math.PI * 0.5;
+  playerGroup.add(heroCharacter);
   trackMesh(playerGroup);
   syncPairs.push({ body: playerBody, mesh: playerGroup });
 
@@ -775,8 +823,8 @@ export function buildWorld(
 
     // Depress and light up the launch pedal
     pedalMesh.material = pedalActiveMat;
-    pedalBody.setTranslation({ x: -10.0, y: 0.25, z: 3.0 }, true);
-    pedalMesh.position.set(-10.0, 0.25, 3.0);
+    pedalBody.setTranslation({ x: -10.2, y: 0.1, z: 2.8 }, true);
+    pedalMesh.position.set(-10.2, 0.1, 2.8);
 
     // Remove the horizontal latch joint so the catapult arm swings around Z
     if (armLatchJoint) {
@@ -809,9 +857,9 @@ export function buildWorld(
       const zDir = pos.z < -0.2 ? -1 : pos.z > 0.2 ? 1 : 0;
       b.setLinvel(
         {
-          x: 4.5 + (i % 3) * 1.8,
-          y: -2.5 - (i % 2) * 1.5,
-          z: zDir * 3.8,
+          x: 5.5 + (i % 3) * 1.8,
+          y: -3.5 - (i % 2) * 1.5,
+          z: zDir * 4.2,
         },
         true,
       );
@@ -825,10 +873,12 @@ export function buildWorld(
       );
     });
 
+    // Keep the heavy boulder ploughing through the shattered bridge
+    boulderBody.setLinvel({ x: 13.5, y: -2.0, z: 0 }, true);
+
     // Wake up the Red Boss Cube so gravity drops it straight into the lava pit below
     bossCubeBody.wakeUp();
-    const bVel = bossCubeBody.linvel();
-    bossCubeBody.setLinvel({ x: Math.min(bVel.x, 2.5), y: -3.5, z: bVel.z * 0.25 }, true);
+    bossCubeBody.setLinvel({ x: 1.5, y: -4.5, z: 0 }, true);
   };
 
   const evaluateContactsAndRules = (elapsedSeconds: number) => {
@@ -843,7 +893,7 @@ export function buildWorld(
       const isTensionPair =
         (h1 === playerCollider.handle && h2 === tensionBlockCollider.handle) ||
         (h2 === playerCollider.handle && h1 === tensionBlockCollider.handle);
-      if (isTensionPair && pPos.y < tensionBlockPos.y - 0.35 && pVel.y >= -1.5) {
+      if (isTensionPair && pPos.y < tensionBlockPos.y - 0.25 && pVel.y >= -2.0) {
         activateTensionBlock();
       }
 
@@ -851,7 +901,7 @@ export function buildWorld(
       const isPedalPair =
         (h1 === playerCollider.handle && h2 === pedalCollider.handle) ||
         (h2 === playerCollider.handle && h1 === pedalCollider.handle);
-      if (isPedalPair && pPos.y > 0.72 && pVel.y <= 1.2) {
+      if (isPedalPair && pPos.y > 0.55 && pVel.y <= 1.2) {
         triggerCatapultLaunch(elapsedSeconds);
       }
 
@@ -876,14 +926,14 @@ export function buildWorld(
     // Backup manifold checks so continuous contacts across substeps are never missed
     if (!tensionCharged) {
       world.contactPairsWith(tensionBlockCollider, (other) => {
-        if (other.handle === playerCollider.handle && pPos.y < tensionBlockPos.y - 0.35) {
+        if (other.handle === playerCollider.handle && pPos.y < tensionBlockPos.y - 0.25) {
           activateTensionBlock();
         }
       });
     }
     if (!catapultLaunched) {
       world.contactPairsWith(pedalCollider, (other) => {
-        if (other.handle === playerCollider.handle && pPos.y > 0.72 && pVel.y <= 1.2) {
+        if (other.handle === playerCollider.handle && pPos.y > 0.55 && pVel.y <= 1.2) {
           triggerCatapultLaunch(elapsedSeconds);
         }
       });
@@ -903,6 +953,15 @@ export function buildWorld(
         catapultArm.setAngvel({ x: 0, y: 0, z: -10.5 }, true);
       } else if (!catapultReleaseDone) {
         catapultReleaseDone = true;
+
+        // Release the cradle latch joint so the boulder separates cleanly
+        if (boulderLatchJoint) {
+          const idx = createdJoints.indexOf(boulderLatchJoint);
+          if (idx >= 0) createdJoints.splice(idx, 1);
+          world.removeImpulseJoint(boulderLatchJoint, true);
+          boulderLatchJoint = null;
+        }
+
         // Lock the catapult arm at its ~60 degree upper stop
         const stopAngle = -1.02;
         const half = stopAngle * 0.5;
@@ -911,8 +970,8 @@ export function buildWorld(
         catapultArm.setLinvel({ x: 0, y: 0, z: 0 }, true);
 
         // Release the boulder along the exact ballistic trajectory into the bridge center span
-        const launchVx = tensionCharged ? 22.0 : 20.8;
-        const launchVy = tensionCharged ? 5.25 : 4.95;
+        const launchVx = tensionCharged ? 10.5 : 9.2;
+        const launchVy = tensionCharged ? 3.6 : 3.1;
         boulderBody.setTranslation({ x: -8.5, y: 4.4, z: 0 }, true);
         boulderBody.setLinvel({ x: launchVx, y: launchVy, z: 0 }, true);
         boulderBody.setAngvel({ x: 0, y: 0, z: -12.0 }, true);
@@ -945,6 +1004,13 @@ export function buildWorld(
       const rot = pair.body.rotation();
       pair.mesh.position.set(pos.x, pos.y, pos.z);
       pair.mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+    }
+
+    for (const c of coinPickups) {
+      if (!c.collector.triggered) {
+        c.mesh.rotation.y = elapsedSeconds * 3.2;
+        c.collector.check(playerBody);
+      }
     }
 
     // Animate lava bubbles
@@ -984,7 +1050,7 @@ export function buildWorld(
     } else {
       bossInLavaFrames = 0;
     }
-    return inPitRegion && bossInLavaFrames >= 8;
+    return inPitRegion && bossInLavaFrames >= 6;
   };
 
   // ============================================================================
@@ -1069,7 +1135,7 @@ export function buildWorld(
     }
 
     let targetVy = pVel.y;
-    const isGrounded = pPos.y <= 1.25 && Math.abs(pVel.y) < 1.5;
+    const isGrounded = pPos.y <= 0.95 && Math.abs(pVel.y) < 1.5;
 
     if (jumpRequested) {
       jumpRequested = false;
@@ -1092,7 +1158,7 @@ export function buildWorld(
     if (slamRequested) {
       slamRequested = false;
       // Siege Slam: downward stomp impulse + releases the catapult torsion latch
-      targetVy = -11.0;
+      targetVy = -11.5;
       if (!catapultLaunched) {
         triggerCatapultLaunch(elapsedSeconds);
       }
@@ -1110,7 +1176,6 @@ export function buildWorld(
   };
 
   let botJumpedTension = false;
-  let botDashedToPedal = false;
   let botJumpedPedal = false;
 
   const stepBotAndRules = (_frameIndex: number, elapsedSeconds: number): StepResult => {
@@ -1119,60 +1184,56 @@ export function buildWorld(
     let botState = 'approaching-tension-block';
 
     if (!tensionCharged) {
-      // Step 1: Move under Tension Block at (-13.5, _, 2.5) and jump from below to hit it
+      // Step 1: Unobstructed run along z = 2.8 to (-13.5, _, 2.8) and jump to hit Tension Block from below
       const dx = -13.5 - pPos.x;
-      const dz = 2.5 - pPos.z;
+      const dz = 2.8 - pPos.z;
       const dist = Math.hypot(dx, dz);
-      if (dist > 0.22) {
+      if (dist > 0.42) {
         playerBody.setLinvel(
-          { x: (dx / dist) * 6.8, y: pVel.y, z: (dz / dist) * 6.8 },
+          { x: (dx / dist) * 8.2, y: pVel.y, z: (dz / dist) * 8.2 },
           true,
         );
       } else {
         botState = 'hitting-tension-block';
-        if (!botJumpedTension && pPos.y <= 1.25) {
+        if (!botJumpedTension && pPos.y <= 0.95) {
           botJumpedTension = true;
-          playerBody.setLinvel({ x: 0, y: 9.6, z: 0 }, true);
-        } else if (pPos.y <= 1.05 && Math.abs(pVel.y) < 0.5) {
-          // Retry jump if needed
-          playerBody.setLinvel({ x: 0, y: 9.6, z: 0 }, true);
+          playerBody.setLinvel({ x: dx * 2.0, y: 9.2, z: dz * 2.0 }, true);
+        } else if (pPos.y <= 0.85 && Math.abs(pVel.y) < 0.6) {
+          playerBody.setLinvel({ x: dx * 2.0, y: 9.2, z: dz * 2.0 }, true);
         }
       }
     } else if (!catapultLaunched) {
-      // Step 2: Dash over to Launch Trigger Pedal at (-10.0, _, 3.0), jump above it, and stomp down
-      const dx = -10.0 - pPos.x;
-      const dz = 3.0 - pPos.z;
+      // Step 2: Dash east along z = 2.8 to Launch Pedal at (-10.2, _, 2.8), hop above it, and slam down
+      const dx = -10.2 - pPos.x;
+      const dz = 2.8 - pPos.z;
       const dist = Math.hypot(dx, dz);
-      if (dist > 0.35 && !botJumpedPedal) {
+      if (dist > 1.15 && !botJumpedPedal) {
         botState = 'dashing-to-launch-pedal';
-        const moveSpeed = !botDashedToPedal ? 11.5 : 7.5;
-        botDashedToPedal = true;
         playerBody.setLinvel(
-          { x: (dx / dist) * moveSpeed, y: pVel.y, z: (dz / dist) * moveSpeed },
+          { x: (dx / dist) * 10.5, y: pVel.y, z: (dz / dist) * 10.5 },
           true,
         );
       } else {
         botState = 'stomping-launch-pedal';
-        if (!botJumpedPedal && pPos.y <= 1.25) {
+        if (!botJumpedPedal && pPos.y <= 0.95) {
           botJumpedPedal = true;
-          playerBody.setLinvel({ x: dx * 2.0, y: 7.8, z: dz * 2.0 }, true);
-        } else if (botJumpedPedal && pPos.y > 1.75 && pVel.y <= 1.5) {
-          // Execute downward Siege Slam stomp onto the pedal
-          playerBody.setLinvel({ x: dx * 3.0, y: -11.5, z: dz * 3.0 }, true);
-        } else if (botJumpedPedal && pPos.y <= 0.95 && Math.abs(pVel.y) < 0.4) {
-          // Hop and stomp again if needed
+          playerBody.setLinvel({ x: dx * 3.8, y: 7.6, z: dz * 3.8 }, true);
+        } else if (botJumpedPedal && (pPos.y > 1.25 || dist < 0.45) && pVel.y <= 2.2) {
+          // Execute downward Siege Slam onto the top of the pedal
+          playerBody.setLinvel({ x: dx * 4.5, y: -12.0, z: dz * 4.5 }, true);
+        } else if (botJumpedPedal && pPos.y <= 0.85 && Math.abs(pVel.y) < 0.5) {
           botJumpedPedal = false;
         }
       }
     } else {
-      // Step 3: Move to the lava pit overlook at (1.5, _, 2.2) to watch the bridge shatter and boss cube sink
+      // Step 3: Move to the lava pit overlook at (1.5, _, 2.8) to watch the bridge shatter and boss cube sink
       botState = bridgeBroken ? 'boss-dropping-into-lava' : 'boulder-in-flight';
       const dx = 1.5 - pPos.x;
-      const dz = 2.2 - pPos.z;
+      const dz = 2.8 - pPos.z;
       const dist = Math.hypot(dx, dz);
       if (dist > 0.4) {
         playerBody.setLinvel(
-          { x: (dx / dist) * 6.2, y: pVel.y, z: (dz / dist) * 6.2 },
+          { x: (dx / dist) * 6.5, y: pVel.y, z: (dz / dist) * 6.5 },
           true,
         );
       } else {
@@ -1183,9 +1244,18 @@ export function buildWorld(
     evaluateContactsAndRules(elapsedSeconds);
     updateVisuals(elapsedSeconds);
 
+    const bPos = boulderBody.translation();
+    if (catapultReleaseDone && bPos.y < 1.1 && !splashSpawned) {
+      spawnLavaSplash(new THREE.Vector3(bPos.x, 0.4, bPos.z));
+    }
+    const failedEarly =
+      catapultReleaseDone && launchStartTime >= 0 && elapsedSeconds - launchStartTime > 1.85
+        ? "Boulder splashed into the lava caldera at x=4.6m short of the bridge (torsion launch velocity 10.5 m/s too low)."
+        : undefined;
     return {
       botState,
-      goalReached: checkGoalReached(),
+      goalReached: false,
+      ...(failedEarly ? { failedEarly } : {}),
     };
   };
 
