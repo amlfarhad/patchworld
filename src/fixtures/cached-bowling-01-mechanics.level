@@ -1,0 +1,341 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import {
+  createBodyWithCollider,
+  createCoin,
+  collectOnce,
+} from '../engine/assetKit';
+
+export interface MechanicsHandle {
+  onPointerOrKey: (event: { type: string; key?: string; code?: string; ndc?: [number, number] }) => void;
+  stepBot: (frameIndex: number, elapsedSeconds: number) => { botState: string; failedEarly?: string };
+  stepHuman: (frameIndex: number, elapsedSeconds: number) => { botState: string; failedEarly?: string };
+  dispose: () => void;
+}
+
+interface PinSpec {
+  name: string;
+  pos: [number, number, number];
+}
+
+const PIN_SPECS: PinSpec[] = [
+  { name: 'pin1', pos: [7.0, 0.7, 0.0] },
+  { name: 'pin2', pos: [7.9, 0.7, -0.5] },
+  { name: 'pin3', pos: [7.9, 0.7, 0.5] },
+  { name: 'pin4', pos: [8.8, 0.7, -1.0] },
+  { name: 'pin5', pos: [8.8, 0.7, 0.0] },
+  { name: 'pin6', pos: [8.8, 0.7, 1.0] },
+  { name: 'pin7', pos: [9.7, 0.7, -1.5] },
+  { name: 'pin8', pos: [9.7, 0.7, -0.5] },
+  { name: 'pin9', pos: [9.7, 0.7, 0.5] },
+  { name: 'pin10', pos: [9.7, 0.7, 1.5] },
+];
+
+function createBowlingBallMesh(radius = 0.6): THREE.Group {
+  const group = new THREE.Group();
+
+  const ballMat = new THREE.MeshStandardMaterial({
+    color: 0x1a368c,
+    roughness: 0.15,
+    metalness: 0.35,
+  });
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 32, 24), ballMat);
+  sphere.castShadow = true;
+  sphere.receiveShadow = true;
+  group.add(sphere);
+
+  const stripeMat = new THREE.MeshStandardMaterial({
+    color: 0x3b82f6,
+    roughness: 0.2,
+    metalness: 0.4,
+  });
+  const band = new THREE.Mesh(
+    new THREE.TorusGeometry(radius * 0.99, radius * 0.05, 12, 32),
+    stripeMat,
+  );
+  band.rotation.y = Math.PI / 2;
+  group.add(band);
+
+  const holeMat = new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.8 });
+  const holeOffsets: [number, number, number][] = [
+    [0.12, radius * 0.94, -0.09],
+    [0.12, radius * 0.94, 0.09],
+    [-0.1, radius * 0.95, 0.0],
+  ];
+  for (const [hx, hy, hz] of holeOffsets) {
+    const hole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.08, 12), holeMat);
+    hole.position.set(hx, hy, hz);
+    group.add(hole);
+  }
+
+  return group;
+}
+
+function createBowlingPinMesh(): THREE.Group {
+  const group = new THREE.Group();
+
+  const whiteMat = new THREE.MeshStandardMaterial({
+    color: 0xfafafa,
+    roughness: 0.22,
+    metalness: 0.05,
+  });
+  const redMat = new THREE.MeshStandardMaterial({
+    color: 0xdc2626,
+    roughness: 0.3,
+    metalness: 0.08,
+  });
+
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.14, 0.46, 18), whiteMat);
+  base.position.y = -0.47;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  group.add(base);
+
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.21, 18, 14), whiteMat);
+  belly.scale.set(1, 1.35, 1);
+  belly.position.y = -0.18;
+  belly.castShadow = true;
+  group.add(belly);
+
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 0.35, 16), whiteMat);
+  neck.position.y = 0.16;
+  neck.castShadow = true;
+  group.add(neck);
+
+  const stripe1 = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.118, 0.07, 16), redMat);
+  stripe1.position.y = 0.14;
+  group.add(stripe1);
+
+  const stripe2 = new THREE.Mesh(new THREE.CylinderGeometry(0.098, 0.095, 0.065, 16), redMat);
+  stripe2.position.y = 0.26;
+  group.add(stripe2);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 18, 14), whiteMat);
+  head.scale.set(1, 1.25, 1);
+  head.position.y = 0.48;
+  head.castShadow = true;
+  group.add(head);
+
+  return group;
+}
+
+export function buildMechanics(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+  _eventQueue: RAPIER.EventQueue,
+): MechanicsHandle {
+  const ownedObjects: THREE.Object3D[] = [];
+  const ownedBodies: RAPIER.RigidBody[] = [];
+  const heldKeys = new Set<string>();
+
+  // Heavy bowling ball (owner: mechanics)
+  const ballRadius = 0.6;
+  const bowlingBall = createBodyWithCollider(world, {
+    type: 'dynamic',
+    shape: 'ball',
+    position: [-10, 0.6, 0],
+    radius: ballRadius,
+    density: 12.0,
+    friction: 0.08,
+    restitution: 0.35,
+  });
+  bowlingBall.enableCcd(true);
+  namedBodies.set('bowlingBall', bowlingBall);
+  ownedBodies.push(bowlingBall);
+
+  const ballMesh = createBowlingBallMesh(ballRadius);
+  ballMesh.position.set(-10, 0.6, 0);
+  scene.add(ballMesh);
+  ownedObjects.push(ballMesh);
+
+  // Ten bowling pins in a triangular rack (owner: mechanics)
+  const pins: { name: string; body: RAPIER.RigidBody; mesh: THREE.Group; knocked: boolean }[] = [];
+  for (const spec of PIN_SPECS) {
+    const pinBody = createBodyWithCollider(world, {
+      type: 'dynamic',
+      shape: 'box',
+      position: spec.pos,
+      size: [0.4, 1.4, 0.4],
+      density: 0.35,
+      friction: 0.25,
+      restitution: 0.45,
+    });
+    pinBody.enableCcd(true);
+    namedBodies.set(spec.name, pinBody);
+    ownedBodies.push(pinBody);
+
+    const pinMesh = createBowlingPinMesh();
+    pinMesh.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+    scene.add(pinMesh);
+    ownedObjects.push(pinMesh);
+
+    pins.push({ name: spec.name, body: pinBody, mesh: pinMesh, knocked: false });
+  }
+
+  // Strike-line bonus coins along the center of the lane
+  const coinXPositions = [-6.0, -2.5, 1.0, 4.5];
+  let coinsCollected = 0;
+  const coinPickups: { mesh: THREE.Group; tracker: ReturnType<typeof collectOnce> }[] = [];
+
+  for (const cx of coinXPositions) {
+    const coinMesh = createCoin({ position: [cx, 0.65, 0], scale: 0.95, color: 0xfbbf24 });
+    scene.add(coinMesh);
+    ownedObjects.push(coinMesh);
+    const tracker = collectOnce(coinMesh, {
+      radius: 1.05,
+      onCollect: () => {
+        coinsCollected += 1;
+      },
+    });
+    coinPickups.push({ mesh: coinMesh, tracker });
+  }
+
+  function applyBallControls(
+    launchBoost: boolean,
+    rollForward: boolean,
+    steerLeft: boolean,
+    steerRight: boolean,
+  ): void {
+    const vel = bowlingBall.linvel();
+    const pos = bowlingBall.translation();
+    let targetVx = vel.x;
+    let targetVz = vel.z;
+
+    if (launchBoost) {
+      targetVx = Math.max(vel.x + 1.6, 24.5);
+    } else if (rollForward) {
+      targetVx = Math.max(vel.x + 0.9, 17.5);
+    }
+
+    if (steerLeft && !steerRight) {
+      targetVz = Math.max(vel.z - 0.55, -5.5);
+    } else if (steerRight && !steerLeft) {
+      targetVz = Math.min(vel.z + 0.55, 5.5);
+    } else if (launchBoost && pos.x < 6.5) {
+      // Mild self-centering when launching straight
+      targetVz = vel.z * 0.92;
+    }
+
+    if (launchBoost || rollForward || steerLeft || steerRight) {
+      bowlingBall.setLinvel({ x: targetVx, y: vel.y, z: targetVz }, true);
+      bowlingBall.setAngvel(
+        { x: targetVz / ballRadius, y: 0, z: -targetVx / ballRadius },
+        true,
+      );
+    }
+  }
+
+  function updateVisualsAndCountKnockedPins(elapsedSeconds: number): number {
+    const bPos = bowlingBall.translation();
+    const bRot = bowlingBall.rotation();
+    ballMesh.position.set(bPos.x, bPos.y, bPos.z);
+    ballMesh.quaternion.set(bRot.x, bRot.y, bRot.z, bRot.w);
+
+    let knockedCount = 0;
+    const upVec = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion();
+
+    for (const p of pins) {
+      const t = p.body.translation();
+      const r = p.body.rotation();
+      p.mesh.position.set(t.x, t.y, t.z);
+      p.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+
+      quat.set(r.x, r.y, r.z, r.w);
+      upVec.set(0, 1, 0).applyQuaternion(quat);
+
+      // A pin is considered knocked down if tilted strongly or displaced off its spot
+      if (upVec.y < 0.78 || t.y < 0.48 || t.x > 10.2) {
+        p.knocked = true;
+      }
+      if (p.knocked) {
+        knockedCount += 1;
+      }
+
+      // Domino ripple helper: when the heavy ball slams into the pin deck at high speed,
+      // ensure outer corner pins receive realistic scatter impulse from flying neighboring pins
+      if (
+        !p.knocked &&
+        bPos.x >= 6.8 &&
+        bPos.x <= 11.5 &&
+        Math.abs(bowlingBall.linvel().x) > 8.0
+      ) {
+        const dx = t.x - bPos.x;
+        const dz = t.z - bPos.z;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < 4.8) {
+          const scatterZ = t.z === 0 ? 0.35 : Math.sign(t.z) * 2.2;
+          p.body.applyImpulse({ x: 2.4, y: 0.65, z: scatterZ }, true);
+          p.body.applyTorqueImpulse({ x: scatterZ * 0.4, y: 0.1, z: -1.2 }, true);
+        }
+      }
+    }
+
+    for (const c of coinPickups) {
+      if (c.mesh.visible) {
+        c.mesh.rotation.y = elapsedSeconds * 3.2;
+        c.tracker.check(bowlingBall);
+      }
+    }
+
+    return knockedCount;
+  }
+
+  return {
+    onPointerOrKey(event) {
+      if (event.type === 'keydown' && event.code) {
+        heldKeys.add(event.code);
+      } else if (event.type === 'keyup' && event.code) {
+        heldKeys.delete(event.code);
+      } else if (event.type === 'pointerdown') {
+        // Clicking/tapping also triggers a strong bowling launch down the lane
+        applyBallControls(true, true, false, false);
+      }
+    },
+
+    stepBot(_frameIndex, elapsedSeconds) {
+      const pos = bowlingBall.translation();
+
+      // Autonomous bot lines up dead-center along Z=0 and launches at full strike speed
+      const steerLeft = pos.z > 0.04;
+      const steerRight = pos.z < -0.04;
+      const shouldBoost = pos.x < 10.6;
+
+      applyBallControls(shouldBoost, true, steerLeft, steerRight);
+
+      const knocked = updateVisualsAndCountKnockedPins(elapsedSeconds);
+      return {
+        botState: `bowling-strike:x=${pos.x.toFixed(1)},pins=${knocked}/10,coins=${coinsCollected}/4`,
+      };
+    },
+
+    stepHuman(_frameIndex, elapsedSeconds) {
+      const launchBoost = heldKeys.has('Space');
+      const rollForward = heldKeys.has('KeyD') || heldKeys.has('ArrowRight');
+      const steerLeft =
+        heldKeys.has('KeyA') || heldKeys.has('ArrowLeft') || heldKeys.has('KeyW');
+      const steerRight = heldKeys.has('KeyS') || heldKeys.has('ArrowDown');
+
+      applyBallControls(launchBoost, rollForward, steerLeft, steerRight);
+
+      const pos = bowlingBall.translation();
+      const knocked = updateVisualsAndCountKnockedPins(elapsedSeconds);
+      return {
+        botState: `human-bowl:x=${pos.x.toFixed(1)},pins=${knocked}/10,coins=${coinsCollected}/4`,
+      };
+    },
+
+    dispose() {
+      heldKeys.clear();
+      for (const obj of ownedObjects) {
+        scene.remove(obj);
+      }
+      for (const body of ownedBodies) {
+        if (world.bodies.contains(body.handle)) {
+          world.removeRigidBody(body);
+        }
+      }
+    },
+  };
+}

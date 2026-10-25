@@ -1,0 +1,14 @@
+{
+  "goal": "Build a bowling lane where a heavy ball rolls down the lane and knocks down a rack of ten pins.",
+  "notes": "Recorded from a live Gemini run (2026-10-25). Quick-start presets replay it instantly instead of building live.",
+  "steps": [
+    {
+      "files": {
+        "src/generated/scene.ts": "cached-bowling-01-scene.level",
+        "src/generated/mechanics.ts": "cached-bowling-01-mechanics.level",
+        "src/generated/activeLevel.ts": "cached-bowling-01-activeLevel.level"
+      },
+      "diagnosis": "Built in 138112ms via planner + 3 parallel builders."
+    }
+  ]
+}
