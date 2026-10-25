@@ -44,6 +44,9 @@ test('preflight accepts a generated module matching the mounted level contract',
         void scene; void world; void bodies; void events
         return {
           stepBotAndRules: () => ({ botState: 'ready', goalReached: false }),
+          stepHumanAndRules: () => ({ botState: 'human', goalReached: false }),
+          controls: [{ key: 'Space', action: 'Jump' }],
+          goal: { type: 'below-y', body: 'ball', y: 0 },
           dispose: () => undefined,
         }
       }
