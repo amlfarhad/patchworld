@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import RAPIER from '@dimforge/rapier3d-compat'
 import * as RAPIER_NAMESPACE from '@dimforge/rapier3d-compat'
 import * as BREAKAGE_KIT from '../engine/breakageKit'
+import * as ASSET_KIT from '../engine/assetKit'
 import type { GeneratedLevelModule } from '../engine/types'
 import type { GeneratedFilePayload } from '../shared/protocol'
 
@@ -13,13 +14,13 @@ import type { GeneratedFilePayload } from '../shared/protocol'
  */
 
 declare global {
-  var __patchworld: { three: unknown; rapier: unknown; rapierNamespace: unknown; breakageKit: unknown } | undefined
+  var __patchworld: { three: unknown; rapier: unknown; rapierNamespace: unknown; breakageKit: unknown; assetKit: unknown } | undefined
 }
 
 const shimUrls = new Map<string, string>()
 const identifier = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 
-function shimModule(globalKey: 'three' | 'rapierNamespace' | 'breakageKit', defaultKey: 'three' | 'rapier' | 'breakageKit', names: string[]): string {
+function shimModule(globalKey: 'three' | 'rapierNamespace' | 'breakageKit' | 'assetKit', defaultKey: 'three' | 'rapier' | 'breakageKit' | 'assetKit', names: string[]): string {
   const lines = [`const M = globalThis.__patchworld.${globalKey};`, `export default globalThis.__patchworld.${defaultKey};`]
   for (const name of names) if (identifier.test(name) && name !== 'default') lines.push(`export const ${name} = M[${JSON.stringify(name)}];`)
   return lines.join('\n')
@@ -31,8 +32,9 @@ function shimFor(specifier: string): string | null {
   let source: string | null = null
   if (specifier === 'three') source = shimModule('three', 'three', Object.keys(THREE))
   else if (specifier === '@dimforge/rapier3d-compat') source = shimModule('rapierNamespace', 'rapier', Object.keys(RAPIER_NAMESPACE))
-  // The physics helpers generated levels may import at run time.
+  // The physics and visual helpers generated levels may import at run time.
   else if (specifier === '../engine/breakageKit') source = shimModule('breakageKit', 'breakageKit', Object.keys(BREAKAGE_KIT))
+  else if (specifier === '../engine/assetKit') source = shimModule('assetKit', 'assetKit', Object.keys(ASSET_KIT))
   else if (/^\.\.\/engine\//.test(specifier)) source = 'export {}' // type-only host modules
   if (source === null) return null
   const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
@@ -44,7 +46,7 @@ const importPattern = /(\bfrom\s*|\bimport\s*\(?\s*)(['"])([^'"]+)\2/g
 
 /** Compiles and imports a generated file set; returns the activeLevel module. */
 export async function loadGeneratedLevel(files: GeneratedFilePayload[]): Promise<GeneratedLevelModule> {
-  globalThis.__patchworld = { three: THREE, rapier: RAPIER, rapierNamespace: RAPIER_NAMESPACE, breakageKit: BREAKAGE_KIT }
+  globalThis.__patchworld = { three: THREE, rapier: RAPIER, rapierNamespace: RAPIER_NAMESPACE, breakageKit: BREAKAGE_KIT, assetKit: ASSET_KIT }
   const byName = new Map(files.map((file) => [file.path.split('/').at(-1)!.replace(/\.ts$/, ''), file]))
   const urls = new Map<string, string>()
   const loading = new Set<string>()
