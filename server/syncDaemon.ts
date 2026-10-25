@@ -4,9 +4,10 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promise
 import { createServer } from 'node:http'
 import { basename, resolve, sep } from 'node:path'
 import { WebSocketServer, type RawData, type WebSocket } from 'ws'
-import { decodePlaytestPacket, type WriteFilesMessage } from '../src/shared/protocol.ts'
+import { decodePlaytestPacket, type FileChange, type IterationEntry, type WriteFilesMessage } from '../src/shared/protocol.ts'
 import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from './generatedFiles.ts'
-import { ArgonOrchestrator, type OrchestratorEvent } from './argonOrchestrator.ts'
+import type { GeneratedPatch } from './argonOrchestrator.ts'
+import { createWorldOrchestrator, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.ts'
 
 type ClientRole = 'browser' | 'agent'
 
@@ -24,19 +25,44 @@ const maxBytes = 12 * 1024 * 1024
 const allowedOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
 const clients = new Set<ClientRecord>()
 const maxIterations = Math.min(20, Math.max(1, Number(process.env.ARGON_MAX_ITERATIONS) || 4))
+const mountTimeoutMs = Math.max(2_000, Number(process.env.ARGON_MOUNT_TIMEOUT_MS) || 15_000)
 const skillPath = resolve(projectRoot, '.agents/SKILL.md')
 let goalEpoch = 0
 let activeGoal = ''
+/** The goal the world on screen was built for; unlike activeGoal it survives pause and completion. */
+let worldGoal = ''
 let iteration = 0
 let previousInteractionId: string | undefined
 let awaitingLevelMount = false
+let mountWatchdog: ReturnType<typeof setTimeout> | undefined
+let history: IterationEntry[] = []
 
-function emitProgress(message: OrchestratorEvent): void {
-  sendToRole('browser', { type: 'progress', iteration, maxIterations, ...message, timestamp: new Date().toISOString() })
+const validateFiles: ValidateFiles = (files) => checkGeneratedTypeScript(validateGeneratedFiles(files), projectRoot)
+
+function emitProgress(event: WorldEvent): void {
+  const timestamp = new Date().toISOString()
+  if (event.critiqueText !== undefined) {
+    sendToRole('browser', { type: 'critique-text', iteration: event.iteration ?? iteration, text: event.critiqueText, final: event.critiqueFinal ?? false, timestamp })
+    return
+  }
+  sendToRole('browser', { type: 'progress', iteration, maxIterations, ...event, timestamp })
 }
 
-function createOrchestrator(epoch: number): ArgonOrchestrator {
-  return new ArgonOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) })
+function createOrchestrator(epoch: number): WorldOrchestrator {
+  return createWorldOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) })
+}
+
+function publishHistory(socket?: WebSocket): void {
+  const payload = { type: 'iteration-history', goal: worldGoal, entries: history }
+  if (socket) sendJson(socket, payload)
+  else sendToRole('browser', payload)
+}
+
+function settleLatestIteration(outcome: IterationEntry['outcome'], details: Pick<IterationEntry, 'runId' | 'failureReason'> = {}): void {
+  const latest = history.at(-1)
+  if (!latest || latest.outcome !== 'pending') return
+  history = [...history.slice(0, -1), { ...latest, outcome, ...details }]
+  publishHistory()
 }
 
 async function publishSkill(socket?: WebSocket): Promise<void> {
@@ -66,21 +92,89 @@ async function readCurrentGeneratedFiles(): Promise<GeneratedFile[]> {
     })))
 }
 
-async function validateAndApply(files: GeneratedFile[], socket?: WebSocket, runId?: string, epoch = goalEpoch): Promise<boolean> {
+async function describeChanges(files: GeneratedFile[]): Promise<FileChange[]> {
+  return Promise.all(files.map(async ({ path, content }) => ({
+    path,
+    before: await readFile(resolve(projectRoot, path), 'utf8').catch(() => null),
+    after: content,
+  })))
+}
+
+/** Typechecks and writes a batch. Returns the written files, or null when rejected or superseded. */
+async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = goalEpoch): Promise<GeneratedFile[] | null> {
   const safeFiles = validateGeneratedFiles(files)
   const diagnostics = await checkGeneratedTypeScript(safeFiles, projectRoot)
   if (diagnostics.length > 0) {
-    if (socket) sendJson(socket, { type: 'patch-rejected', runId, diagnostics: diagnostics.join('\n') })
-    sendToRole('agent', { type: 'patch-rejected', runId, diagnostics: diagnostics.join('\n') })
+    const rejected = { type: 'patch-rejected', runId, diagnostics: diagnostics.join('\n') }
+    sendToRole('browser', rejected)
+    sendToRole('agent', rejected)
+    return null
+  }
+  if (epoch !== goalEpoch) return null
+  const changes = await describeChanges(safeFiles)
+  await writeBatch(safeFiles)
+  const paths = safeFiles.map(({ path }) => path)
+  sendToRole('agent', { type: 'patch-applied', runId, files: paths })
+  sendToRole('browser', { type: 'patch-applied', runId, files: paths, iteration, changes })
+  return safeFiles
+}
+
+/** Writes an orchestrator patch as the next iteration and starts waiting for the browser to mount it. */
+async function applyIterationPatch(patch: GeneratedPatch, runId: string | undefined, epoch: number): Promise<boolean> {
+  iteration += 1
+  awaitingLevelMount = true
+  const applied = await validateAndApply(patch.files, runId, epoch)
+  if (!applied) {
+    awaitingLevelMount = false
     return false
   }
-  if (epoch !== goalEpoch) return false
-  await writeBatch(safeFiles)
-  const result = { type: 'patch-applied', runId, files: safeFiles.map(({ path }) => path) }
-  if (socket) sendJson(socket, result)
-  sendToRole('agent', result)
-  sendToRole('browser', result)
+  armMountWatchdog(epoch)
+  history = [...history, {
+    iteration,
+    outcome: 'pending',
+    files: applied.map(({ path }) => path),
+    diagnosis: patch.diagnosis,
+    timestamp: new Date().toISOString(),
+  }]
+  publishHistory()
+  previousInteractionId = patch.interactionId
+  await persistSkill(patch.skillContent)
   return true
+}
+
+function armMountWatchdog(epoch: number): void {
+  clearMountWatchdog()
+  mountWatchdog = setTimeout(() => {
+    mountWatchdog = undefined
+    if (epoch !== goalEpoch || !awaitingLevelMount) return
+    const seconds = Math.round(mountTimeoutMs / 1000)
+    void handleMountFailure(`The updated level did not load within ${seconds} s. The module may have thrown while evaluating; check the browser console.`)
+  }, mountTimeoutMs)
+}
+
+function clearMountWatchdog(): void {
+  if (mountWatchdog) clearTimeout(mountWatchdog)
+  mountWatchdog = undefined
+}
+
+function beginGoal(goal: string): number {
+  clearMountWatchdog()
+  activeGoal = goal
+  worldGoal = goal
+  iteration = 0
+  previousInteractionId = undefined
+  awaitingLevelMount = false
+  history = []
+  publishHistory()
+  return ++goalEpoch
+}
+
+function reportGoalError(error: unknown, socket?: WebSocket): void {
+  awaitingLevelMount = false
+  clearMountWatchdog()
+  const message = error instanceof Error ? error.message : String(error)
+  if (socket) sendJson(socket, { type: 'goal-error', message })
+  emitProgress({ phase: 'error', message, iteration })
 }
 
 async function startGoal(socket: WebSocket, goal: string): Promise<void> {
@@ -88,32 +182,20 @@ async function startGoal(socket: WebSocket, goal: string): Promise<void> {
     sendJson(socket, { type: 'goal-error', message: 'Enter a level goal between 1 and 2,000 characters.' })
     return
   }
-  const epoch = ++goalEpoch
-  activeGoal = goal.trim()
-  iteration = 0
-  previousInteractionId = undefined
-  awaitingLevelMount = false
+  const epoch = beginGoal(goal.trim())
   sendToRole('browser', { type: 'start-goal-accepted', goal: activeGoal })
   try {
-    const orchestrator = createOrchestrator(epoch)
-    const patch = await orchestrator.generateInitialWorld(activeGoal, (files) => checkGeneratedTypeScript(validateGeneratedFiles(files), projectRoot))
+    const patch = await createOrchestrator(epoch).generateInitialWorld(activeGoal, validateFiles)
     if (epoch !== goalEpoch) return
-    iteration = 1
-    awaitingLevelMount = true
-    if (!await validateAndApply(patch.files, socket, patch.interactionId, epoch)) { awaitingLevelMount = false; return }
-    previousInteractionId = patch.interactionId
-    await persistSkill(patch.skillContent)
+    if (!await applyIterationPatch(patch, patch.interactionId, epoch)) return
     emitProgress({ phase: 'hmr-pending', message: 'World generated; waiting for the browser to mount the updated module.', iteration })
   } catch (error) {
     if (epoch !== goalEpoch) return
-    awaitingLevelMount = false
-    const message = error instanceof Error ? error.message : String(error)
-    sendJson(socket, { type: 'goal-error', message })
-    emitProgress({ phase: 'error', message })
+    reportGoalError(error, socket)
   }
 }
 
-async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestPacket>>, browserSocket: WebSocket): Promise<void> {
+async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestPacket>>): Promise<void> {
   if (!activeGoal) return
   const epoch = goalEpoch
   if (iteration >= maxIterations) {
@@ -130,21 +212,48 @@ async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestP
       currentFiles,
       previousInteractionId,
       iteration,
-    }, (files) => checkGeneratedTypeScript(validateGeneratedFiles(files), projectRoot))
+    }, validateFiles)
     if (epoch !== goalEpoch) return
     emitProgress({ phase: 'diagnosis', message: patch.diagnosis ?? 'Patch is ready for the next playtest.', diagnosis: patch.diagnosis, iteration })
-    iteration += 1
-    awaitingLevelMount = true
-    const applied = await validateAndApply(patch.files, browserSocket, packet.metadata.runId, epoch)
-    if (!applied) { awaitingLevelMount = false; return }
-    previousInteractionId = patch.interactionId
-    await persistSkill(patch.skillContent)
+    if (!await applyIterationPatch(patch, packet.metadata.runId, epoch)) return
     emitProgress({ phase: 'hmr-pending', message: 'Patch accepted; waiting for the updated level to mount.', iteration })
   } catch (error) {
     if (epoch !== goalEpoch) return
-    awaitingLevelMount = false
-    const message = error instanceof Error ? error.message : String(error)
-    emitProgress({ phase: 'error', message, iteration })
+    reportGoalError(error)
+  }
+}
+
+/** A generated level threw while mounting, or never mounted. Repairs it when the orchestrator can, otherwise stops the loop. */
+async function handleMountFailure(error: string, stack?: string): Promise<void> {
+  clearMountWatchdog()
+  sendToRole('agent', { type: 'level-mount-failed', error, stack })
+  const wasAwaiting = awaitingLevelMount
+  awaitingLevelMount = false
+  settleLatestIteration('mount-failed', { failureReason: error })
+  if (!wasAwaiting || !activeGoal) {
+    emitProgress({ phase: 'error', message: `Generated level failed to load: ${error}`, iteration })
+    return
+  }
+  const epoch = goalEpoch
+  const stop = (reason: string) => {
+    activeGoal = ''
+    emitProgress({ phase: 'error', message: `Generated level failed to load: ${error} ${reason}`, iteration })
+  }
+  if (iteration >= maxIterations) return stop('The iteration limit is reached, so the loop stopped.')
+  if (![...clients].some((client) => client.role === 'browser')) return stop('No browser engine is connected, so the loop stopped.')
+  try {
+    const orchestrator = createOrchestrator(epoch)
+    if (!orchestrator.repairMountFailure) return stop('This orchestrator cannot repair load failures yet, so the loop stopped. Start the goal again or take over.')
+    emitProgress({ phase: 'critiquing', message: 'The level crashed while loading; asking for a repair.', iteration })
+    const patch = await orchestrator.repairMountFailure({ error, stack, currentFiles: await readCurrentGeneratedFiles(), previousInteractionId, iteration }, validateFiles)
+    if (epoch !== goalEpoch) return
+    emitProgress({ phase: 'diagnosis', message: patch.diagnosis ?? 'Repair is ready for the next playtest.', diagnosis: patch.diagnosis, iteration })
+    if (!await applyIterationPatch(patch, undefined, epoch)) return
+    emitProgress({ phase: 'hmr-pending', message: 'Repair accepted; waiting for the updated level to mount.', iteration })
+  } catch (repairError) {
+    if (epoch !== goalEpoch) return
+    activeGoal = ''
+    reportGoalError(repairError)
   }
 }
 
@@ -308,7 +417,8 @@ async function handleBrowserMessage(
       sendJson(socket, { type: 'playtest-accepted', runId: packet.metadata.runId })
       forwardBinaryToRole('agent', rawDataToBytes(data))
       sendToRole('agent', { type: 'playtest-artifact-saved', runId: packet.metadata.runId })
-      void critiqueFailedRun(packet, socket)
+      settleLatestIteration('failed', { runId: packet.metadata.runId, failureReason: packet.metadata.failureReason })
+      void critiqueFailedRun(packet)
     } catch (error) {
       sendJson(socket, {
         type: 'daemon-error',
@@ -322,22 +432,30 @@ async function handleBrowserMessage(
     const message = parseJsonMessage(data)
     if (message.type === 'playtest-passed') {
       sendToRole('agent', message)
+      settleLatestIteration('passed', { runId: typeof message.runId === 'string' ? message.runId : undefined })
       activeGoal = ''
       emitProgress({ phase: 'complete', message: 'Goal reached. Human controls are available.' })
     } else if (message.type === 'pause-goal') {
       goalEpoch += 1
       activeGoal = ''
       awaitingLevelMount = false
+      clearMountWatchdog()
       emitProgress({ phase: 'human', message: 'Autonomous loop paused. Human control enabled.' })
     }
     else if (message.type === 'start-goal' && typeof message.goal === 'string') void startGoal(socket, message.goal)
     else if (message.type === 'level-mounted') {
+      clearMountWatchdog()
       sendToRole('browser', { type: 'progress', phase: 'hmr-swapped', message: 'Updated physics module mounted through Vite HMR.', timestamp: new Date().toISOString(), iteration })
       if (awaitingLevelMount) {
         awaitingLevelMount = false
         sendJson(socket, { type: 'start-playtest', maxFrames: 240 })
         emitProgress({ phase: 'recording', message: 'Recording the 8-second autonomous bot playtest.', iteration })
       }
+    }
+    else if (message.type === 'level-mount-failed') {
+      const error = typeof message.error === 'string' && message.error.trim() ? message.error.slice(0, 4_000) : 'Unknown error'
+      const stack = typeof message.stack === 'string' ? message.stack.slice(0, 8_000) : undefined
+      void handleMountFailure(error, stack)
     }
     else sendJson(socket, { type: 'daemon-error', message: 'Unknown browser message type' })
   } catch (error) {
@@ -372,7 +490,10 @@ websocketServer.on('connection', (socket) => {
         record = { socket, role: message.role }
         clients.add(record)
         sendJson(socket, { type: 'registered', role: record.role })
-        if (record.role === 'browser') void publishSkill(socket)
+        if (record.role === 'browser') {
+          void publishSkill(socket)
+          if (history.length > 0) publishHistory(socket)
+        }
       } catch (error) {
         sendJson(socket, { type: 'daemon-error', message: error instanceof Error ? error.message : 'Invalid registration' })
         socket.close(1008, 'Register client role first')
