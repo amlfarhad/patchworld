@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import RAPIER from '@dimforge/rapier3d-compat'
 import { AutonomousLoop } from './AutonomousLoop'
+import { evaluateLevelGoal } from './goalEvaluator'
 import type { ContactSnapshot, GeneratedLevelModule, MountedLevel, StepResult } from './types'
 
 const rapierReady = RAPIER.init()
@@ -228,6 +229,15 @@ export class EngineHost {
       this.frameIndex = nextFrame
       this.accumulator -= this.fixedStep
       const contacts = this.drainContactEvents()
+      if (stepResult) {
+        const engineGoalReached =
+          !stepResult.failedEarly &&
+          evaluateLevelGoal(this.levelHandle?.goal, this.namedBodies)
+        stepResult = {
+          ...stepResult,
+          goalReached: engineGoalReached,
+        }
+      }
       this.autonomousLoop.afterPhysicsFrame(
         stepResult,
         this.namedBodies,
