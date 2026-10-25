@@ -1,5 +1,5 @@
 import { watchFile } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { basename, resolve, sep } from 'node:path'
@@ -7,7 +7,8 @@ import { WebSocketServer, type RawData, type WebSocket } from 'ws'
 import { decodePlaytestPacket, type FileChange, type IterationEntry, type WriteFilesMessage } from '../src/shared/protocol.ts'
 import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from './generatedFiles.ts'
 import type { GeneratedPatch } from './argonOrchestrator.ts'
-import { createWorldOrchestrator, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.ts'
+import { createWorldOrchestrator, mockScriptFromArgs, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.ts'
+import { RunRecorder, type RecordedStep } from './runRecorder.ts'
 
 type ClientRole = 'browser' | 'agent'
 
@@ -27,6 +28,9 @@ const clients = new Set<ClientRecord>()
 const maxIterations = Math.min(20, Math.max(1, Number(process.env.ARGON_MAX_ITERATIONS) || 4))
 const mountTimeoutMs = Math.max(2_000, Number(process.env.ARGON_MOUNT_TIMEOUT_MS) || 15_000)
 const skillPath = resolve(projectRoot, '.agents/SKILL.md')
+const runsRoot = resolve(projectRoot, 'artifacts/runs')
+/** Set by --mock[=name or folder] or ARGON_MOCK: replay a scripted run instead of calling Gemini. */
+const mockScript = mockScriptFromArgs()
 let goalEpoch = 0
 let activeGoal = ''
 /** The goal the world on screen was built for; unlike activeGoal it survives pause and completion. */
@@ -36,8 +40,29 @@ let previousInteractionId: string | undefined
 let awaitingLevelMount = false
 let mountWatchdog: ReturnType<typeof setTimeout> | undefined
 let history: IterationEntry[] = []
+/** Live goals are recorded as replayable mock scripts under artifacts/runs/. */
+let recording: Promise<RunRecorder | null> | null = null
+/** The browser that runs autonomous playtests for the current goal; other open tabs only mirror progress. */
+let engineSocket: WebSocket | null = null
+/** Signature of the last batch that passed the typecheck, so applying it does not check it twice. */
+let lastCleanBatch = ''
+let writeQueue: Promise<void> = Promise.resolve()
 
-const validateFiles: ValidateFiles = (files) => checkGeneratedTypeScript(validateGeneratedFiles(files), projectRoot)
+const batchSignature = (files: GeneratedFile[]) =>
+  createHash('sha256').update(JSON.stringify(files.map(({ path, content }) => [path, content]))).digest('hex')
+
+const validateFiles: ValidateFiles = async (files) => {
+  const safeFiles = validateGeneratedFiles(files)
+  const diagnostics = await checkGeneratedTypeScript(safeFiles, projectRoot)
+  lastCleanBatch = diagnostics.length === 0 ? batchSignature(safeFiles) : ''
+  return diagnostics
+}
+
+/** True when `socket` is the engine browser. Adopts it when the engine tab closed or reloaded. */
+function isEngine(socket: WebSocket): boolean {
+  if (!engineSocket || engineSocket.readyState !== engineSocket.OPEN) engineSocket = socket
+  return engineSocket === socket
+}
 
 function emitProgress(event: WorldEvent): void {
   const timestamp = new Date().toISOString()
@@ -49,7 +74,15 @@ function emitProgress(event: WorldEvent): void {
 }
 
 function createOrchestrator(epoch: number): WorldOrchestrator {
-  return createWorldOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) })
+  return createWorldOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) }, { mockScript, projectRoot })
+}
+
+async function recordStep(step: RecordedStep): Promise<void> {
+  try {
+    await (await recording)?.record(step)
+  } catch (error) {
+    console.warn('[Argon sync] Could not record this run step:', error)
+  }
 }
 
 function publishHistory(socket?: WebSocket): void {
@@ -103,7 +136,7 @@ async function describeChanges(files: GeneratedFile[]): Promise<FileChange[]> {
 /** Typechecks and writes a batch. Returns the written files, or null when rejected or superseded. */
 async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = goalEpoch): Promise<GeneratedFile[] | null> {
   const safeFiles = validateGeneratedFiles(files)
-  const diagnostics = await checkGeneratedTypeScript(safeFiles, projectRoot)
+  const diagnostics = batchSignature(safeFiles) === lastCleanBatch ? [] : await checkGeneratedTypeScript(safeFiles, projectRoot)
   if (diagnostics.length > 0) {
     const rejected = { type: 'patch-rejected', runId, diagnostics: diagnostics.join('\n') }
     sendToRole('browser', rejected)
@@ -137,6 +170,7 @@ async function applyIterationPatch(patch: GeneratedPatch, runId: string | undefi
     timestamp: new Date().toISOString(),
   }]
   publishHistory()
+  void recordStep({ files: applied, diagnosis: patch.diagnosis, skillContent: patch.skillContent })
   previousInteractionId = patch.interactionId
   await persistSkill(patch.skillContent)
   return true
@@ -166,6 +200,10 @@ function beginGoal(goal: string): number {
   awaitingLevelMount = false
   history = []
   publishHistory()
+  recording = mockScript ? null : RunRecorder.start(goal, runsRoot).catch((error: unknown) => {
+    console.warn('[Argon sync] Could not start recording this run:', error)
+    return null
+  })
   return ++goalEpoch
 }
 
@@ -183,6 +221,7 @@ async function startGoal(socket: WebSocket, goal: string): Promise<void> {
     return
   }
   const epoch = beginGoal(goal.trim())
+  engineSocket = socket
   sendToRole('browser', { type: 'start-goal-accepted', goal: activeGoal })
   try {
     const patch = await createOrchestrator(epoch).generateInitialWorld(activeGoal, validateFiles)
@@ -274,7 +313,28 @@ function rawDataToBytes(data: RawData): Uint8Array {
   return data
 }
 
-async function writeBatch(files: GeneratedFile[]): Promise<void> {
+/** Serializes writes, so the goal loop and agent patches never race on the same files. */
+function writeBatch(files: GeneratedFile[]): Promise<void> {
+  const run = writeQueue.then(() => writeBatchNow(files))
+  writeQueue = run.catch(() => {})
+  return run
+}
+
+/** Windows briefly locks files that Vite's watcher is reading; retry the rename instead of failing the patch. */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 5 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw error
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50 * (attempt + 1)))
+    }
+  }
+}
+
+async function writeBatchNow(files: GeneratedFile[]): Promise<void> {
   await mkdir(generatedRoot, { recursive: true })
   const staged: Array<{ temporary: string; destination: string }> = []
 
@@ -290,12 +350,12 @@ async function writeBatch(files: GeneratedFile[]): Promise<void> {
     }
     const entryModule = staged.find(({ destination }) => destination.endsWith(`${sep}activeLevel.ts`))
     for (const file of staged) {
-      if (file !== entryModule) await rename(file.temporary, file.destination)
+      if (file !== entryModule) await renameWithRetry(file.temporary, file.destination)
     }
     if (entryModule) {
       // Let Vite observe imported helper modules before it recompiles activeLevel.ts.
       if (staged.length > 1) await new Promise((resolvePromise) => setTimeout(resolvePromise, 80))
-      await rename(entryModule.temporary, entryModule.destination)
+      await renameWithRetry(entryModule.temporary, entryModule.destination)
     }
   } catch (error) {
     await Promise.all(staged.map(({ temporary }) => rm(temporary, { force: true })))
@@ -417,8 +477,10 @@ async function handleBrowserMessage(
       sendJson(socket, { type: 'playtest-accepted', runId: packet.metadata.runId })
       forwardBinaryToRole('agent', rawDataToBytes(data))
       sendToRole('agent', { type: 'playtest-artifact-saved', runId: packet.metadata.runId })
-      settleLatestIteration('failed', { runId: packet.metadata.runId, failureReason: packet.metadata.failureReason })
-      void critiqueFailedRun(packet)
+      if (isEngine(socket)) {
+        settleLatestIteration('failed', { runId: packet.metadata.runId, failureReason: packet.metadata.failureReason })
+        void critiqueFailedRun(packet)
+      }
     } catch (error) {
       sendJson(socket, {
         type: 'daemon-error',
@@ -432,6 +494,7 @@ async function handleBrowserMessage(
     const message = parseJsonMessage(data)
     if (message.type === 'playtest-passed') {
       sendToRole('agent', message)
+      if (!isEngine(socket)) return
       settleLatestIteration('passed', { runId: typeof message.runId === 'string' ? message.runId : undefined })
       activeGoal = ''
       emitProgress({ phase: 'complete', message: 'Goal reached. Human controls are available.' })
@@ -444,6 +507,7 @@ async function handleBrowserMessage(
     }
     else if (message.type === 'start-goal' && typeof message.goal === 'string') void startGoal(socket, message.goal)
     else if (message.type === 'level-mounted') {
+      if (!isEngine(socket)) return
       clearMountWatchdog()
       sendToRole('browser', { type: 'progress', phase: 'hmr-swapped', message: 'Updated physics module mounted through Vite HMR.', timestamp: new Date().toISOString(), iteration })
       if (awaitingLevelMount) {
@@ -453,6 +517,7 @@ async function handleBrowserMessage(
       }
     }
     else if (message.type === 'level-mount-failed') {
+      if (!isEngine(socket)) return
       const error = typeof message.error === 'string' && message.error.trim() ? message.error.slice(0, 4_000) : 'Unknown error'
       const stack = typeof message.stack === 'string' ? message.stack.slice(0, 8_000) : undefined
       void handleMountFailure(error, stack)
@@ -525,4 +590,6 @@ httpServer.listen(port, host, () => {
   console.log(`[Argon sync] Listening on ws://${host}:${port}`)
   console.log(`[Argon sync] Writes are limited to ${generatedRoot}`)
   console.log(`[Argon sync] Failed playtests are saved under ${artifactRoot}`)
+  if (mockScript) console.log(`[Argon sync] Mock mode: replaying "${mockScript}"; no Gemini calls are made`)
+  else console.log(`[Argon sync] Live runs are recorded under ${runsRoot}; replay one with --mock=<folder>`)
 })

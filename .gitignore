@@ -14,7 +14,13 @@ dist-ssr
 .env
 .env.*
 !.env.example
-artifacts/playtests/
+# Sync daemon output: playtest videos, recorded runs, the agent's learned SKILL.md
+artifacts/
+.agents/
+src/generated/*.tmp
+
+# Local Claude Code launch config
+.claude/
 
 # Editor directories and files
 .vscode/*

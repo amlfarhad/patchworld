@@ -1,5 +1,6 @@
 import { ArgonOrchestrator, type FailedRunInput, type GeneratedPatch, type OrchestratorEvent } from './argonOrchestrator.ts'
 import type { GeneratedFile } from './generatedFiles.ts'
+import { MockOrchestrator } from './mockOrchestrator.ts'
 
 export type ValidateFiles = (files: GeneratedFile[]) => Promise<string[]>
 
@@ -38,6 +39,23 @@ export interface WorldOrchestrator {
   reviseWorld?(input: TwistInput, validate: ValidateFiles): Promise<GeneratedPatch>
 }
 
-export function createWorldOrchestrator(emit: (event: WorldEvent) => void): WorldOrchestrator {
+/**
+ * Reads the mock script from `--mock` / `--mock=<name or path>` or `ARGON_MOCK`.
+ * Returns null for live mode.
+ */
+export function mockScriptFromArgs(argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env): string | null {
+  const flag = argv.find((arg) => arg === '--mock' || arg.startsWith('--mock='))
+  const value = flag ? flag.slice('--mock='.length) : (env.ARGON_MOCK ?? '').trim()
+  if (flag && !value) return 'catapult'
+  if (!value || value === '0' || value.toLowerCase() === 'false') return null
+  if (value === '1' || value.toLowerCase() === 'true') return 'catapult'
+  return value
+}
+
+export function createWorldOrchestrator(
+  emit: (event: WorldEvent) => void,
+  options: { mockScript: string | null; projectRoot: string },
+): WorldOrchestrator {
+  if (options.mockScript) return new MockOrchestrator(emit, options.mockScript, options.projectRoot)
   return new ArgonOrchestrator(emit)
 }

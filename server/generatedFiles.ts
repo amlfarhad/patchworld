@@ -10,6 +10,11 @@ const maxFiles = 64
 const maxBytes = 12 * 1024 * 1024
 const generatedPath = /^src\/generated\/[A-Za-z0-9_.-]+\.(ts|glsl)$/
 
+// Parsed (and bound) source files survive between checks, so library typings such as
+// lib.dom.d.ts and three's are parsed once rather than on every patch.
+const sourceFileCache = new Map<string, { text: string; file: ts.SourceFile }>()
+let previousProgram: ts.Program | undefined
+
 export function validateGeneratedFiles(value: unknown): GeneratedFile[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > maxFiles) {
     throw new Error(`File batch must contain 1 to ${maxFiles} files`)
@@ -54,18 +59,24 @@ export async function checkGeneratedTypeScript(
   const host = ts.createCompilerHost(parsed.options)
   const baseFileExists = host.fileExists.bind(host)
   const baseReadFile = host.readFile.bind(host)
-  const baseGetSourceFile = host.getSourceFile.bind(host)
   host.fileExists = (fileName) => candidateSources.has(resolve(fileName)) || baseFileExists(fileName)
   host.readFile = (fileName) => candidateSources.get(resolve(fileName)) ?? baseReadFile(fileName)
-  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
-    const source = candidateSources.get(resolve(fileName))
-    return source === undefined
-      ? baseGetSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
-      : ts.createSourceFile(fileName, source, languageVersion)
+  host.getSourceFile = (fileName, languageVersion, onError) => {
+    const text = candidateSources.get(resolve(fileName)) ?? baseReadFile(fileName)
+    if (text === undefined) {
+      onError?.(`File not found: ${fileName}`)
+      return undefined
+    }
+    const cached = sourceFileCache.get(fileName)
+    if (cached?.text === text) return cached.file
+    const file = ts.createSourceFile(fileName, text, languageVersion)
+    sourceFileCache.set(fileName, { text, file })
+    return file
   }
 
   const rootNames = [...new Set([...parsed.fileNames, ...candidateSources.keys()])]
-  const program = ts.createProgram({ rootNames, options: parsed.options, host })
+  const program = ts.createProgram({ rootNames, options: parsed.options, host, oldProgram: previousProgram })
+  previousProgram = program
   const diagnostics = ts.getPreEmitDiagnostics(program)
     .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
   return diagnostics.length === 0 ? [] : [formatDiagnostics(diagnostics, projectRoot)]

@@ -7,6 +7,7 @@
     "dev": "concurrently -k -n vite,sync -c cyan,green \"vite\" \"tsx server/syncDaemon.ts\"",
     "dev:vite": "vite",
     "dev:sync": "tsx server/syncDaemon.ts",
+    "dev:mock": "concurrently -k -n vite,sync -c cyan,green \"vite\" \"tsx server/syncDaemon.ts --mock\"",
     "test": "node --import tsx --test server/*.test.ts",
     "dry-run": "node --import tsx server/testPush.ts",
     "smoke:google": "node --import tsx server/smokeGoogle.ts",

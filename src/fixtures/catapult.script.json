@@ -1,0 +1,19 @@
+{
+  "goal": "Build a catapult that launches a boulder through a bridge and drops a red boss cube into a lava pit.",
+  "notes": "Replayed by `npm run dev:mock`. Draft 1 fires backwards (launch x is negative). Draft 2 aims right but the boulder collider is a sensor, so it passes through the boss. Draft 3 knocks the boss into the lava.",
+  "steps": [
+    {
+      "files": { "src/generated/activeLevel.ts": "catapult-1.ts" }
+    },
+    {
+      "files": { "src/generated/activeLevel.ts": "catapult-2.ts" },
+      "diagnosis": "At 0:00.5 the catapult fires and the boulder flies left, away from the castle. It leaves the frame within half a second and falls out of the arena at about 0:01.9, and the boss never moves. Telemetry shows the boulder's x velocity at -7 m/s from the launch frame: the launch vector's x sign is flipped. Fix: launch toward +x at 7 m/s.",
+      "skillContent": "# Learned physics invariants\n\n- Launch vectors point from the launcher toward the target. Check the sign of each axis against the scene layout before tuning the magnitude.\n"
+    },
+    {
+      "files": { "src/generated/activeLevel.ts": "catapult-3.ts" },
+      "diagnosis": "At 0:01.1 the boulder reaches the boss but passes straight through it, then sinks through the lava and out of the arena. Telemetry shows no contact between the boulder and the boss on any frame. The boulder's collider is flagged as a sensor, so it detects overlaps but never collides. Fix: make the boulder collider solid.",
+      "skillContent": "# Learned physics invariants\n\n- Launch vectors point from the launcher toward the target. Check the sign of each axis against the scene layout before tuning the magnitude.\n- Anything that must hit or push another body needs a solid collider. Sensors only report overlaps.\n- A projectile held in place as a kinematic body must switch to dynamic at release, or gravity never acts on it.\n"
+    }
+  ]
+}
