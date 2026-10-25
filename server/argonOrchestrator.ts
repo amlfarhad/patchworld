@@ -1,8 +1,8 @@
 import 'dotenv/config'
 import { GoogleGenAI } from '@google/genai'
-import { rm, writeFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
@@ -12,6 +12,27 @@ const model = process.env.ARGON_MODEL ?? 'gemini-4-argon'
 const critiqueModel = process.env.ARGON_CRITIQUE_MODEL ?? 'gemini-3.8-flash'
 const managedAgent = process.env.ARGON_AGENT ?? 'antigravity-preview-09-2026'
 const pollIntervalMs = 2_000
+const defaultSkillPath = resolve(process.cwd(), '.agents/SKILL.md')
+
+export const patchResponseSchema = {
+  type: 'object',
+  properties: {
+    files: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+    diagnosis: { type: 'string' },
+    skillContent: { type: 'string' },
+  },
+  required: ['files'],
+} as const
 
 export interface CritiqueTextMessage {
   type: 'critique-text'
@@ -65,25 +86,85 @@ export interface FailedRunInput {
   iteration: number
 }
 
-const levelContract = `
-Generated TypeScript must export buildWorld(scene, world, namedBodies, eventQueue) and return MountedLevel.
+export interface MountFailureInput {
+  error: string
+  currentFiles: GeneratedFile[]
+  previousInteractionId?: string
+  iteration: number
+}
+
+export interface ReviseWorldInput {
+  instruction: string
+  currentFiles: GeneratedFile[]
+  previousInteractionId?: string
+  iteration: number
+}
+
+export const levelContract = `
+Generated TypeScript must export buildWorld(scene, world, namedBodies, eventQueue) and return MountedLevel matching src/engine/types.ts.
 The exact host contract is:
-interface StepResult { botState: string; goalReached: boolean; failedEarly?: string }
-interface MountedLevel {
-  stepBotAndRules(frameIndex: number, elapsedSeconds: number): StepResult;
+export interface ControlBinding {
+  key: string;
+  action: string;
+}
+export type LevelGoal =
+  | { type: 'below-y'; body: string; y: number }
+  | { type: 'above-y'; body: string; y: number }
+  | { type: 'in-region'; body: string; min: [number, number, number]; max: [number, number, number] }
+  | { type: 'near-point'; body: string; target: [number, number, number]; radius: number };
+export interface StepResult {
+  botState: string;
+  goalReached: boolean;
+  failedEarly?: string;
+}
+export interface MountedLevel {
+  dispose: () => void;
+  stepBotAndRules: (frameIndex: number, elapsedSeconds: number) => StepResult;
+  stepHumanAndRules: (frameIndex: number, elapsedSeconds: number) => StepResult;
+  controls: ControlBinding[];
+  goal: LevelGoal;
   onPointerOrKey?: (event: { type: string; key?: string; ndc?: [number, number] }) => void;
-  stepHumanAndRules?: (frameIndex: number, elapsedSeconds: number) => StepResult;
-  dispose(): void;
 }
-interface GeneratedLevelModule {
-  buildWorld(scene: THREE.Scene, world: RAPIER.World,
-    namedBodies: Map<string, RAPIER.RigidBody>, eventQueue: RAPIER.EventQueue): MountedLevel;
+export interface GeneratedLevelModule {
+  buildWorld: (
+    scene: THREE.Scene,
+    world: RAPIER.World,
+    namedBodies: Map<string, RAPIER.RigidBody>,
+    eventQueue: RAPIER.EventQueue,
+  ) => MountedLevel;
 }
-Implement onPointerOrKey and stepHumanAndRules for interactive play after autonomous success. Human updates must not apply bot actions. Keep visuals in sync with bodies in both modes.
-Import THREE from 'three' and RAPIER from '@dimforge/rapier3d-compat'. Keep all generated files as direct children of src/generated/.
-Return one JSON object only: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"short summary with video timestamps when available","skillContent":"Markdown physical invariants learned from evidence, or empty when none"}.
-For patches, return only the files in src/generated/ that changed. Never use eval, Function, remote script loading, or write outside src/generated/.
+
+Host stage & physics rules:
+- EngineHost already creates the sky dome, directional/hemisphere lights with shadows, and a fixed ground collider at y = -0.25 (top surface at y = 0, size 120x0.5x120). Do not duplicate the ground collider or dispose host lights/stage objects in dispose().
+- Register every key rigid body in namedBodies (especially the body referenced by MountedLevel.goal.body) via namedBodies.set(name, body); EngineHost evaluates MountedLevel.goal against namedBodies every frame.
+- Both stepBotAndRules and stepHumanAndRules are required. stepHumanAndRules must update visuals and rule checks for interactive human takeover without applying autonomous bot impulses/motors.
+- Populate controls: ControlBinding[] with clear keyboard/pointer bindings and handle them in onPointerOrKey and stepHumanAndRules.
+- Optional breakage & sensor kit helpers may be imported from '../engine/breakageKit':
+  createBreakableWall(scene, world, namedBodies, options), createSnapJoint(world, options), createSensorZone(scene, world, options), createLavaSensor(scene, world, options), createGoalSensor(scene, world, options), applyLaunchImpulse(body, options).
+- Import * as THREE from 'three' and RAPIER from '@dimforge/rapier3d-compat'. Keep all generated files as direct children of src/generated/ (with entry module src/generated/activeLevel.ts).
+- Return one JSON object only matching the response schema: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"short summary with video timestamps when available","skillContent":"Markdown physical invariants learned from evidence, or empty when none"}.
+- For patches, return only the files in src/generated/ that changed. Never use eval, Function, remote script loading, or write outside src/generated/.
 `
+
+export async function loadLearnedSkill(skillFilePath = defaultSkillPath): Promise<string> {
+  try {
+    const content = (await readFile(skillFilePath, 'utf8')).trim()
+    return content.slice(0, 64_000)
+  } catch {
+    return ''
+  }
+}
+
+export function buildWorldGenerationPrompt(goal: string, skillMarkdown = ''): string {
+  const sections = [
+    `Create a complete physics sandbox level for this goal: ${goal}`,
+    levelContract.trim(),
+  ]
+  if (skillMarkdown.trim()) {
+    sections.push(`Learned physics invariants from .agents/SKILL.md (apply these invariants when designing the level):\n${skillMarkdown.trim()}`)
+  }
+  return sections.join('\n\n')
+}
 
 const fileUploadTimeoutMs = 60_000
 const fileUploadPollIntervalMs = 1_000
@@ -309,7 +390,10 @@ export function shrinkTelemetry(
 export class ArgonOrchestrator {
   private readonly ai: GoogleGenAI
 
-  constructor(private readonly emit: (event: OrchestratorEvent) => void) {
+  constructor(
+    private readonly emit: (event: OrchestratorEvent) => void,
+    private readonly skillFilePath = defaultSkillPath,
+  ) {
     const apiKey = process.env.GEMINI_API_KEY
     if (!apiKey) throw new Error('GEMINI_API_KEY is missing; add it to physics-sandbox/.env')
     this.ai = new GoogleGenAI({ apiKey })
@@ -331,18 +415,21 @@ export class ArgonOrchestrator {
   async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
     const startedAt = performance.now()
     const timings: Record<string, number> = {}
-    const prompt = `Create a complete physics sandbox level for this goal: ${goal}\n\n${levelContract}`
+    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+    const prompt = buildWorldGenerationPrompt(goal, skillMarkdown)
     this.emit({ phase: 'synthesizing', message: 'Synthesizing the first physics world…' })
     const synthStart = performance.now()
     const interaction = await this.ai.interactions.create({
       model,
       background: true,
       input: prompt,
+      response_mime_type: 'application/json',
+      response_format: patchResponseSchema,
       generation_config: {
         max_output_tokens: 131_072,
         thinking_level: 'high',
       },
-      system_instruction: 'You generate safe, typed Three.js and Rapier level modules for the Argon engine. Follow the output contract exactly.',
+      system_instruction: 'You generate safe, typed Three.js and Rapier level modules for the Argon engine. Follow the output contract and JSON schema exactly.',
     })
     interactionKinds.set(interaction.id, 'model')
     const completed = await this.waitForInteraction(interaction.id, 'Long-decode world generation')
@@ -445,16 +532,15 @@ export class ArgonOrchestrator {
     try {
       this.emit({ phase: 'critiquing', message: 'Uploading the failed run for playtest critique…', iteration: input.iteration })
       const uploadStart = performance.now()
-      const uploadedVideo = await this.ai.interactions
-        ? await this.ai.files.upload({
-            file: videoPath,
-            config: { mimeType: 'video/webm' },
-          })
-        : ({ state: 'FAILED' } as UploadedFileHandle)
+      const uploadedVideo = await this.ai.files.upload({
+        file: videoPath,
+        config: { mimeType: 'video/webm' },
+      })
       const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
       timings.uploadMs = Math.round(performance.now() - uploadStart)
 
       const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
+      const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
 
       const critiqueStart = performance.now()
       const critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
@@ -475,7 +561,8 @@ export class ArgonOrchestrator {
         `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
         JSON.stringify(compactTelemetry),
         `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
-        levelContract,
+        ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
+        levelContract.trim(),
       ].join('\n\n')
 
       const patchStart = performance.now()
@@ -485,11 +572,13 @@ export class ArgonOrchestrator {
         background: true,
         ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
         input: patchPrompt,
+        response_mime_type: 'application/json',
+        response_format: patchResponseSchema,
         generation_config: {
           max_output_tokens: 65_536,
           thinking_level: 'low',
         },
-        system_instruction: 'You patch Three.js and Rapier level modules for the Argon engine. Return only the files in src/generated/ that changed.',
+        system_instruction: 'You patch Three.js and Rapier level modules for the Argon engine. Return only the files in src/generated/ that changed matching the JSON schema.',
       })
       interactionKinds.set(patchInteraction.id, 'model')
       const completedPatch = await this.waitForInteraction(patchInteraction.id, 'Physics level patch')
@@ -519,6 +608,88 @@ export class ArgonOrchestrator {
     }
   }
 
+  async repairMountFailure(
+    input: MountFailureInput,
+    validate: (files: GeneratedFile[]) => Promise<string[]>,
+  ): Promise<GeneratedPatch> {
+    const startedAt = performance.now()
+    const timings: Record<string, number> = {}
+    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+    const prompt = [
+      `Repair the runtime mount failure in the generated physics level: ${input.error}`,
+      `Iteration: ${input.iteration}`,
+      `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
+      ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
+      levelContract.trim(),
+    ].join('\n\n')
+    const chainedModelId = resolveChainedInteractionId(input.previousInteractionId, 'model')
+    const interaction = await this.ai.interactions.create({
+      model,
+      background: true,
+      ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
+      input: prompt,
+      response_mime_type: 'application/json',
+      response_format: patchResponseSchema,
+      generation_config: {
+        max_output_tokens: 65_536,
+        thinking_level: 'low',
+      },
+    })
+    interactionKinds.set(interaction.id, 'model')
+    const completed = await this.waitForInteraction(interaction.id, 'Mount failure repair')
+    const patched = await this.parseAndRepair(
+      extractInteractionText(completed),
+      interaction.id,
+      validate,
+      prompt,
+      input.currentFiles,
+      timings,
+    )
+    timings.totalMs = Math.round(performance.now() - startedAt)
+    return { ...patched, timings }
+  }
+
+  async reviseWorld(
+    input: ReviseWorldInput,
+    validate: (files: GeneratedFile[]) => Promise<string[]>,
+  ): Promise<GeneratedPatch> {
+    const startedAt = performance.now()
+    const timings: Record<string, number> = {}
+    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+    const prompt = [
+      `Revise the current physics level according to this instruction: ${input.instruction}`,
+      `Iteration: ${input.iteration}`,
+      `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
+      ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
+      levelContract.trim(),
+    ].join('\n\n')
+    const chainedModelId = resolveChainedInteractionId(input.previousInteractionId, 'model')
+    const interaction = await this.ai.interactions.create({
+      model,
+      background: true,
+      ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
+      input: prompt,
+      response_mime_type: 'application/json',
+      response_format: patchResponseSchema,
+      generation_config: {
+        max_output_tokens: 65_536,
+        thinking_level: 'low',
+      },
+    })
+    interactionKinds.set(interaction.id, 'model')
+    const completed = await this.waitForInteraction(interaction.id, 'World revision')
+    const patched = await this.parseAndRepair(
+      extractInteractionText(completed),
+      interaction.id,
+      validate,
+      prompt,
+      input.currentFiles,
+      timings,
+    )
+    timings.totalMs = Math.round(performance.now() - startedAt)
+    return { ...patched, timings }
+  }
+
   private async parseAndRepair(
     output: string,
     interactionId: string,
@@ -541,6 +712,8 @@ export class ArgonOrchestrator {
         background: true,
         ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
         input: `${originalPrompt}\n\nCompiler diagnostics from the proposed files (repair once):\n${diagnostics.join('\n')}\nReturn only the corrected changed file set as the required JSON object.`,
+        response_mime_type: 'application/json',
+        response_format: patchResponseSchema,
         generation_config: { max_output_tokens: 65_536, thinking_level: 'low' },
       })
       interactionKinds.set(repair.id, 'model')
