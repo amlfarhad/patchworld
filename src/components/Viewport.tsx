@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import * as InitialLevel from '../generated/activeLevel'
 import { EngineHost } from '../engine/EngineHost'
+import { setHostedMounter } from '../hosted/inPageDaemon'
 import type { GeneratedLevelModule } from '../engine/types'
 
 let currentModule: GeneratedLevelModule = InitialLevel
@@ -15,6 +16,7 @@ export function Viewport({ onReady }: { onReady: (host: EngineHost | null) => vo
     const host = new EngineHost(canvas)
     activeHost = host
     onReady(host)
+    setHostedMounter((module) => host.mountLevel(module))
     void host.initialize(currentModule).catch(reportError)
     const onKey = (event: KeyboardEvent) => {
       host.dispatchPointerOrKey({ type: event.type, key: event.key })
@@ -36,6 +38,7 @@ export function Viewport({ onReady }: { onReady: (host: EngineHost | null) => vo
       canvas.removeEventListener('keydown', onKey); canvas.removeEventListener('keyup', onKey)
       canvas.removeEventListener('pointerdown', onPointer); canvas.removeEventListener('pointerup', onPointer)
       if (activeHost === host) activeHost = null
+      setHostedMounter(null)
       onReady(null)
       host.dispose()
     }

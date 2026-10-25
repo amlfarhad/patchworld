@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build:hosted",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/argon.ts": {
+      "maxDuration": 300,
+      "includeFiles": "{src/**,tsconfig.app.json,node_modules/@types/three/**,node_modules/@dimforge/rapier3d-compat/**/*.d.ts,node_modules/vite/client.d.ts,node_modules/vite/types/**,node_modules/typescript/lib/*.d.ts}"
+    }
+  }
+}
