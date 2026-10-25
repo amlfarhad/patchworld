@@ -54,3 +54,20 @@ test('preflight accepts a generated module matching the mounted level contract',
 
   assert.deepEqual(diagnostics, [])
 })
+
+test('preflight ignores unused locals so a working level does not cost a repair pass', async () => {
+  const files = validateGeneratedFiles([{
+    path: 'src/generated/activeLevel.ts',
+    content: `
+      import type { GeneratedLevelModule } from '../engine/types'
+      export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world, bodies, events) => {
+        const unusedHeight = 3
+        return {
+          stepBotAndRules: () => ({ botState: 'ready', goalReached: false }),
+          dispose: () => undefined,
+        }
+      }
+    `,
+  }])
+  assert.deepEqual(await checkGeneratedTypeScript(files, process.cwd()), [])
+})
