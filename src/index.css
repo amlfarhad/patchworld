@@ -2,7 +2,11 @@
 @import '@fontsource-variable/sora';
 @import '@fontsource/ibm-plex-mono/latin-400.css';
 @import '@fontsource/ibm-plex-mono/latin-500.css';
-@import 'tailwindcss';
+/* Scan only the app's own source. Scanning the whole repo made any doc edit reload the page,
+   and every generated level patch rebuild this stylesheet. */
+@import 'tailwindcss' source('./');
+@source not './generated';
+@source not './fixtures';
 
 @theme {
   --font-sans: 'Sora Variable', sans-serif;

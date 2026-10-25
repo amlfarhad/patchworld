@@ -60,10 +60,12 @@ export class EngineHost {
     await rapierReady
     if (this.disposed) return
     this.eventQueue = new RAPIER.EventQueue(true)
-    await this.mountLevel(levelModule)
+    // Connect and start rendering before mounting, so a broken generated level left on disk
+    // cannot keep the page offline after a reload.
     this.autonomousLoop.connect()
     this.lastFrameTime = performance.now()
     this.animationFrame = window.requestAnimationFrame(this.tick)
+    await this.mountLevel(levelModule)
   }
 
   async mountLevel(levelModule: GeneratedLevelModule): Promise<void> {

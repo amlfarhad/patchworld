@@ -44,9 +44,16 @@ export function Viewport({ onReady }: { onReady: (host: EngineHost | null) => vo
 }
 
 if (import.meta.hot) {
+  const reportMountFailure = (error: unknown) => {
+    reportError(error)
+    activeHost?.autonomousLoop.reportMountFailure(error)
+  }
   import.meta.hot.accept('../generated/activeLevel', (module) => {
-    if (!module || typeof module.buildWorld !== 'function') return
+    if (!module || typeof module.buildWorld !== 'function') {
+      reportMountFailure(new TypeError('src/generated/activeLevel.ts must export a buildWorld function'))
+      return
+    }
     currentModule = module as unknown as GeneratedLevelModule
-    void activeHost?.mountLevel(currentModule).catch(reportError)
+    void activeHost?.mountLevel(currentModule).catch(reportMountFailure)
   })
 }

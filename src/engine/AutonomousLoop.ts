@@ -1,5 +1,5 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
-import { encodePlaytestPacket, type DaemonMessage, type PlaytestFailedMetadata } from '../shared/protocol'
+import { encodePlaytestPacket, type BrowserMessage, type DaemonMessage, type PlaytestFailedMetadata } from '../shared/protocol'
 import { SynchronizedRecorder } from './TelemetryRecorder'
 import type { ContactSnapshot, MountedLevel, StepResult } from './types'
 
@@ -17,6 +17,10 @@ export class AutonomousLoop {
   private telemetryFrames = 0
   private enabled = false
   private mountedWhileUploading = false
+  /** A level mounted before the socket opened (e.g. after Vite reloaded the page); tell the daemon once registered. */
+  private unreportedMount = false
+  /** The current human attempt already ended with failedEarly; report the loss once per attempt. */
+  private humanLossReported = false
   private reconnectTimer: number | null = null
   private disposed = false
   private readonly listeners = new Set<(state: LoopState) => void>()
@@ -63,7 +67,8 @@ export class AutonomousLoop {
   }
 
   onLevelMounted(): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'level-mounted' }))
+    this.humanLossReported = false
+    this.unreportedMount = !this.send({ type: 'level-mounted' })
     if (this.enabled && this.state === 'awaiting-patch') this.beginRun()
     else if (this.enabled && this.state === 'uploading') this.mountedWhileUploading = true
   }
@@ -72,12 +77,19 @@ export class AutonomousLoop {
 
   takeOver(): void {
     this.enabled = false
+    this.humanLossReported = false
     this.runGeneration += 1
     this.mountedWhileUploading = false
     if (this.recorder?.isRecording) void this.recorder.stop().catch(() => {})
     this.recorder = null
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'pause-goal' }))
+    this.send({ type: 'pause-goal' })
     this.setState('human')
+  }
+
+  /** Tells the daemon the generated level threw while mounting, so it can repair it or stop the loop. */
+  reportMountFailure(error: unknown): void {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    this.send({ type: 'level-mount-failed', error: failure.message || String(error), stack: failure.stack })
   }
 
   startGoal(goal: string): void {
@@ -89,7 +101,7 @@ export class AutonomousLoop {
     this.enabled = true
     this.setState('awaiting-patch')
     window.dispatchEvent(new CustomEvent('argon:goal-submitted', { detail: goal }))
-    this.socket.send(JSON.stringify({ type: 'start-goal', goal }))
+    this.send({ type: 'start-goal', goal })
   }
 
   stepBotAndRules(level: MountedLevel | null): StepResult | null {
@@ -104,6 +116,13 @@ export class AutonomousLoop {
     namedBodies: Map<string, RAPIER.RigidBody>,
     contacts: ContactSnapshot[],
   ): void {
+    if (this.isHumanControlled) {
+      if (result?.failedEarly && !this.humanLossReported) {
+        this.humanLossReported = true
+        window.dispatchEvent(new CustomEvent('argon:human-lost', { detail: { reason: result.failedEarly } }))
+      }
+      return
+    }
     if (this.state !== 'running' || !result) return
     this.runTicks += 1
     const shouldCapture = this.runTicks % 2 === 0 || result.goalReached || Boolean(result.failedEarly)
@@ -142,13 +161,29 @@ export class AutonomousLoop {
       window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: message.message }))
     } else if (message.type === 'registered') {
       window.dispatchEvent(new CustomEvent('argon:connection', { detail: true }))
+      if (this.unreportedMount) {
+        this.unreportedMount = false
+        this.send({ type: 'level-mounted' })
+      }
     } else if (message.type === 'progress') {
       window.dispatchEvent(new CustomEvent('argon:progress', { detail: message }))
     } else if (message.type === 'goal-error') {
       window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: message.message }))
     } else if (message.type === 'start-goal-accepted') {
       window.dispatchEvent(new CustomEvent('argon:progress', { detail: { phase: 'accepted', message: 'Goal accepted. Starting world synthesis.', timestamp: new Date().toISOString() } }))
+    } else if (message.type === 'critique-text') {
+      window.dispatchEvent(new CustomEvent('argon:critique-text', { detail: message }))
+    } else if (message.type === 'iteration-history') {
+      window.dispatchEvent(new CustomEvent('argon:iteration-history', { detail: message }))
+    } else if (message.type === 'patch-applied') {
+      window.dispatchEvent(new CustomEvent('argon:patch-applied', { detail: message }))
     }
+  }
+
+  private send(message: BrowserMessage): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify(message))
+    return true
   }
 
   private beginRun(): void {
@@ -180,11 +215,11 @@ export class AutonomousLoop {
       const videoUrl = URL.createObjectURL(videoBlob)
       window.dispatchEvent(new CustomEvent('argon:video-preview', { detail: { runId: this.runId, videoUrl, failed: !goalReached, failureReason, frameCount: telemetry.length } }))
       if (goalReached) {
-        this.socket?.send(JSON.stringify({
+        this.send({
           type: 'playtest-passed',
           runId: this.runId,
           frameCount: telemetry.length,
-        }))
+        })
         this.setState('complete')
         return
       }

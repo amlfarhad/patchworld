@@ -21,6 +21,9 @@ export default defineConfig({
   },
   server: {
     watch: {
+      // Runtime output of the sync daemon, and docs. Changes to these silently reloaded the page,
+      // which killed the playtest in progress whenever the agent published SKILL.md.
+      ignored: ['**/.agents/**', '**/artifacts/**', '**/src/generated/*.tmp', '**/*.md'],
       awaitWriteFinish: {
         stabilityThreshold: 50,
         pollInterval: 10,
