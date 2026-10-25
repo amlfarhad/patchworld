@@ -25,7 +25,7 @@ export class AutonomousLoop {
   private readonly canvas: HTMLCanvasElement
   private readonly socketUrl: string
 
-  constructor(canvas: HTMLCanvasElement, socketUrl = 'ws://127.0.0.1:4174') {
+  constructor(canvas: HTMLCanvasElement, socketUrl: string = import.meta.env.VITE_ARGON_SYNC_URL ?? 'ws://127.0.0.1:4174') {
     this.canvas = canvas
     this.socketUrl = socketUrl
   }
