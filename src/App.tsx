@@ -19,6 +19,9 @@ export default function App() {
   const closeDrawer = useCallback(() => setDrawerOpen(false), [])
   const busy = ['accepted', 'synthesizing', 'thinking', 'critiquing', 'typecheck-retry', 'running', 'recording', 'uploading', 'awaiting-patch', 'hmr-pending'].includes(state.phase)
   const startGoal = (goal: string) => host?.autonomousLoop.startGoal(goal)
+  // A phone clip as the goal needs AutonomousLoop.startGoalWithVideo (daemon and orchestrator support); until it exists the attach button stays hidden.
+  const videoLoop = host?.autonomousLoop as { startGoalWithVideo?: (goal: string, clip: Blob) => void } | undefined
+  const startGoalWithVideo = videoLoop?.startGoalWithVideo ? (goal: string, clip: Blob) => videoLoop.startGoalWithVideo?.(goal, clip) : undefined
   const takeover = () => { host?.autonomousLoop.takeOver(); document.querySelector<HTMLCanvasElement>('.engine-canvas')?.focus({ preventScroll: true }) }
   const reset = () => { void host?.resetLevel().catch((e: unknown) => window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: String(e) }))) }
   const twist = (value: string) => startGoal(`${state.goal || 'Modify the current physics world'}. Add this feature: ${value}`)
@@ -29,7 +32,7 @@ export default function App() {
     <div className="viewport-frame" aria-hidden="true"><i /><i /><i /><i /></div>
     <header className="command-header"><div className="brand" aria-label="Patchworld"><span className="brand-symbol"><span /><span /><span /><span /></span><span>patchworld<span className="brand-period">✦</span></span><span className="brand-divider" /><span className="brand-subtitle">A PHYSICS<br />PLAYGROUND</span></div><div className="header-center micro-label"><span className="tiny-square" /> WORLD 01 <ChevronRight size={10} /> <span className="text-white/35">{state.hasLevel ? 'NOW PLAYING' : 'NEW GAME'}</span></div><div className="header-actions"><span className="connection-badge micro-label"><span className={`status-beacon ${state.connected ? 'connected' : ''}`} />{state.connected ? 'READY TO PLAY' : 'CONNECTING'}</span><button className="icon-button" aria-label={focusMode ? 'Show interface' : 'Focus viewport'} aria-pressed={focusMode} onClick={() => setFocusMode(!focusMode)}>{focusMode ? <Shrink size={16} /> : <Expand size={16} />}</button></div></header>
     <div className="hud-layer" inert={focusMode}><StatusTicker state={state} /><PiPCard state={state} /></div>
-    {(!state.human || !state.hasLevel) && <div className="hud-layer" inert={focusMode}><PromptBar compact={state.hasLevel} busy={busy || state.phase === 'running'} disabled={!state.connected || !state.ready} error={state.error} onSubmit={startGoal} /></div>}
+    {(!state.human || !state.hasLevel) && <div className="hud-layer" inert={focusMode}><PromptBar compact={state.hasLevel} busy={busy || state.phase === 'running'} disabled={!state.connected || !state.ready} error={state.error} onSubmit={startGoal} onSubmitVideo={startGoalWithVideo} /></div>}
     {state.hasLevel && <div className="hud-layer" inert={focusMode}><ControlOverlay active={state.human} onTakeOver={takeover} onReset={reset} onTwist={twist} busy={busy} host={host} controls={state.controls} goal={state.levelGoal} levelMounts={state.levelMounts} /></div>}
     {state.human && <HumanResultScreen state={state} onPlayAgain={reset} />}
     <AgentDrawer open={drawerOpen && !focusMode} onClose={closeDrawer} state={state} />
