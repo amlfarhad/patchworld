@@ -55,7 +55,49 @@ Return one JSON object only: {"files":[{"path":"src/generated/activeLevel.ts","c
 Include activeLevel.ts in every patch. Never use eval, Function, remote script loading, or write outside src/generated/.
 `
 
+const fileUploadTimeoutMs = 60_000
+const fileUploadPollIntervalMs = 1_000
 const interactionKinds = new Map<string, 'model' | 'agent'>()
+
+export interface UploadedFileHandle {
+  name?: string
+  uri?: string
+  mimeType?: string
+  state?: string
+}
+
+export async function waitForUploadedFileActive(
+  filesApi: { get: (params: { name: string }) => Promise<UploadedFileHandle> },
+  uploaded: UploadedFileHandle,
+  timeoutMs = fileUploadTimeoutMs,
+  intervalMs = fileUploadPollIntervalMs,
+): Promise<UploadedFileHandle> {
+  const initialState = String(uploaded.state ?? '').toUpperCase()
+  if (initialState === 'FAILED') {
+    throw new Error(`Uploaded video ${uploaded.name ?? ''} failed processing (state: FAILED)`.trim())
+  }
+  if (initialState === 'ACTIVE') {
+    return uploaded
+  }
+  if (!uploaded.name) {
+    throw new Error('Uploaded video is missing a resource name for state polling')
+  }
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for uploaded video ${uploaded.name} to become ACTIVE`)
+    }
+    const current = await filesApi.get({ name: uploaded.name })
+    const state = String(current.state ?? '').toUpperCase()
+    if (state === 'ACTIVE') {
+      return { ...uploaded, ...current }
+    }
+    if (state === 'FAILED') {
+      throw new Error(`Uploaded video ${uploaded.name} failed processing (state: FAILED)`)
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, intervalMs))
+  }
+}
 
 export function extractInteractionText(interaction: {
   output_text?: string | null
@@ -126,6 +168,7 @@ export class ArgonOrchestrator {
         file: videoPath,
         config: { mimeType: 'video/webm' },
       })
+      const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
       const prompt = `Inspect the attached browser playtest video and the frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return a complete patched file set and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry (${input.metadata.frameCount} frames):\n${JSON.stringify(input.metadata.telemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
       const chainedAgentId = resolveChainedInteractionId(input.previousInteractionId, 'agent')
       const interaction = await this.ai.interactions.create({
@@ -133,7 +176,7 @@ export class ArgonOrchestrator {
         environment: 'remote',
         ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
         input: [
-          { type: 'video', uri: uploadedVideo.uri, mime_type: uploadedVideo.mimeType ?? 'video/webm' },
+          { type: 'video', uri: activeVideo.uri, mime_type: activeVideo.mimeType ?? 'video/webm' },
           { type: 'text', text: prompt },
         ],
         background: true,
