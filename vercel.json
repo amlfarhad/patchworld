@@ -6,7 +6,7 @@
   "functions": {
     "api/argon.ts": {
       "maxDuration": 300,
-      "includeFiles": "{src/**,tsconfig.app.json,node_modules/@types/three/**,node_modules/@dimforge/rapier3d-compat/**/*.d.ts,node_modules/vite/client.d.ts,node_modules/vite/types/**,node_modules/typescript/lib/*.d.ts}"
+      "includeFiles": "{src/engine/**,src/generated/**,tsconfig.app.json,node_modules/@types/**,node_modules/fflate/**/*.d.ts,node_modules/meshoptimizer/**/*.d.ts,node_modules/@tweenjs/**/*.d.ts,node_modules/@dimforge/rapier3d-compat/**/*.d.ts,node_modules/vite/client.d.ts,node_modules/vite/types/**,node_modules/typescript/lib/*.d.ts}"
     }
   }
 }

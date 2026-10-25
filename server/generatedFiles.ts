@@ -49,6 +49,8 @@ const lintOnlyCodes = new Set([6133, 6138, 6192, 6196, 6198, 6199, 6205, 7027, 7
 export async function checkGeneratedTypeScript(
   files: GeneratedFile[],
   projectRoot: string,
+  /** Check only the generated files and what they import (engine types, three, Rapier), not the whole app. */
+  options: { generatedOnly?: boolean } = {},
 ): Promise<string[]> {
   const configPath = resolve(projectRoot, 'tsconfig.app.json')
   const config = ts.readConfigFile(configPath, ts.sys.readFile)
@@ -62,7 +64,8 @@ export async function checkGeneratedTypeScript(
 
   if (candidateSources.size === 0) return []
 
-  const host = ts.createCompilerHost(parsed.options)
+  const compilerOptions = options.generatedOnly ? { ...parsed.options, types: [] } : parsed.options
+  const host = ts.createCompilerHost(compilerOptions)
   const baseFileExists = host.fileExists.bind(host)
   const baseReadFile = host.readFile.bind(host)
   host.fileExists = (fileName) => candidateSources.has(resolve(fileName)) || baseFileExists(fileName)
@@ -80,8 +83,8 @@ export async function checkGeneratedTypeScript(
     return file
   }
 
-  const rootNames = [...new Set([...parsed.fileNames, ...candidateSources.keys()])]
-  const program = ts.createProgram({ rootNames, options: parsed.options, host, oldProgram: previousProgram })
+  const rootNames = options.generatedOnly ? [...candidateSources.keys()] : [...new Set([...parsed.fileNames, ...candidateSources.keys()])]
+  const program = ts.createProgram({ rootNames, options: compilerOptions, host, oldProgram: previousProgram })
   previousProgram = program
   const diagnostics = ts.getPreEmitDiagnostics(program)
     .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error && !lintOnlyCodes.has(diagnostic.code))

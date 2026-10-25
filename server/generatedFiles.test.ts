@@ -71,3 +71,22 @@ test('preflight ignores unused locals so a working level does not cost a repair 
   }])
   assert.deepEqual(await checkGeneratedTypeScript(files, process.cwd()), [])
 })
+
+test('generated-only check covers the level and its imports without the rest of the app', async () => {
+  const good = validateGeneratedFiles([{ path: 'src/generated/activeLevel.ts', content: `
+    import * as THREE from 'three'
+    import RAPIER from '@dimforge/rapier3d-compat'
+    import type { GeneratedLevelModule } from '../engine/types'
+    export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world) => {
+      scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1)))
+      world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
+      return { stepBotAndRules: () => ({ botState: 'ok', goalReached: false }), dispose: () => undefined }
+    }
+  ` }])
+  assert.deepEqual(await checkGeneratedTypeScript(good, process.cwd(), { generatedOnly: true }), [])
+  const bad = validateGeneratedFiles([{ path: 'src/generated/activeLevel.ts', content: `
+    import type { GeneratedLevelModule } from '../engine/types'
+    export const buildWorld: GeneratedLevelModule['buildWorld'] = () => ({ stepBotAndRules: () => ({ botState: 1, goalReached: false }), dispose: () => undefined })
+  ` }])
+  assert.ok((await checkGeneratedTypeScript(bad, process.cwd(), { generatedOnly: true })).length > 0)
+})

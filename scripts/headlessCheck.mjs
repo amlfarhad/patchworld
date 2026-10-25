@@ -44,6 +44,13 @@ await send('Runtime.enable')
 await send('Page.enable')
 await send('Page.navigate', { url })
 await sleep(4000)
+if (process.env.LIVE === '1') {
+  // Switch the hosted page to Live mode (an empty passcode works when the deployment has none).
+  await evaluate(`localStorage.setItem('patchworld.livePasscode', ${JSON.stringify(process.env.PASSCODE || 'open')})`)
+  await send('Page.reload')
+  await sleep(4000)
+  console.log('mode:', await evaluate(`document.querySelector('.mode-chip')?.innerText`))
+}
 const clicked = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find((b) => b.textContent.includes(${JSON.stringify(preset)})); b?.click(); return !!b })()`)
 console.log(`clicked "${preset}": ${clicked}`)
 

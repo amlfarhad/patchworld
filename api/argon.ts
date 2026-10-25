@@ -30,7 +30,7 @@ function passcodeAccepted(given: string | null): boolean {
 const validate: ValidateFiles = async (files) => {
   const safe = validateGeneratedFiles(files)
   try {
-    return await checkGeneratedTypeScript(safe, process.cwd())
+    return await checkGeneratedTypeScript(safe, process.cwd(), { generatedOnly: true })
   } catch (error) {
     console.warn('[argon api] Full typecheck unavailable, falling back to a syntax check:', error)
     const problems: string[] = []
