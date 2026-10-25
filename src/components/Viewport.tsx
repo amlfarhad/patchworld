@@ -19,8 +19,8 @@ export function Viewport({ onReady }: { onReady: (host: EngineHost | null) => vo
     setHostedMounter((module) => host.mountLevel(module))
     void host.initialize(currentModule).catch(reportError)
     const onKey = (event: KeyboardEvent) => {
-      host.dispatchPointerOrKey({ type: event.type, key: event.key })
-      if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) event.preventDefault()
+      host.dispatchPointerOrKey({ type: event.type, key: event.key, code: event.code })
+      if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) || event.code === 'Space') event.preventDefault()
     }
     const onPointer = (event: PointerEvent) => {
       canvas.focus({ preventScroll: true })

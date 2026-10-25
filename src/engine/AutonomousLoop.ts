@@ -1,7 +1,8 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
 import { encodePlaytestPacket, type BrowserMessage, type DaemonMessage, type PlaytestFailedMetadata } from '../shared/protocol'
+import { keyLabel } from '../components/levelText'
 import { SynchronizedRecorder } from './TelemetryRecorder'
-import type { ContactSnapshot, MountedLevel, StepResult } from './types'
+import type { ContactSnapshot, ControlBinding, MountedLevel, StepResult } from './types'
 import { InPageSocket } from '../hosted/inPageDaemon'
 import { isHosted } from '../hosted/mode'
 
@@ -28,10 +29,16 @@ export class AutonomousLoop {
   private readonly listeners = new Set<(state: LoopState) => void>()
   private readonly canvas: HTMLCanvasElement
   private readonly socketUrl: string
+  private readonly checkControls?: () => ControlBinding[]
 
-  constructor(canvas: HTMLCanvasElement, socketUrl: string = import.meta.env.VITE_ARGON_SYNC_URL ?? 'ws://127.0.0.1:4174') {
+  constructor(
+    canvas: HTMLCanvasElement,
+    socketUrl: string = import.meta.env.VITE_ARGON_SYNC_URL ?? 'ws://127.0.0.1:4174',
+    checkControls?: () => ControlBinding[],
+  ) {
     this.canvas = canvas
     this.socketUrl = socketUrl
+    this.checkControls = checkControls
   }
 
   connect(): void {
@@ -148,7 +155,13 @@ export class AutonomousLoop {
       this.recorder?.capturePhysicsFrame(this.telemetryFrames, namedBodies, contacts, result.botState)
     }
     if (result.goalReached) {
-      void this.finishRun(true)
+      const deadControls = this.checkControls?.() ?? []
+      if (deadControls.length > 0) {
+        const labels = deadControls.map((c) => `${keyLabel(c.key)} (${c.action})`).join(', ')
+        void this.finishRun(false, `Declared controls did nothing: ${labels}`)
+      } else {
+        void this.finishRun(true)
+      }
     } else if (result.failedEarly || this.runTicks >= this.frameLimit * 2) {
       void this.finishRun(false, result.failedEarly ?? `Timed out after ${this.frameLimit} recorded frames`)
     }

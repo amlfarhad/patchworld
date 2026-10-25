@@ -133,7 +133,7 @@ export interface MountedLevel {
   stepHumanAndRules: (frameIndex: number, elapsedSeconds: number) => StepResult;
   controls: ControlBinding[];
   goal: LevelGoal;
-  onPointerOrKey?: (event: { type: string; key?: string; ndc?: [number, number] }) => void;
+  onPointerOrKey?: (event: { type: string; key?: string; code?: string; ndc?: [number, number] }) => void;
 }
 export interface GeneratedLevelModule {
   buildWorld: (
@@ -148,7 +148,12 @@ Host stage & physics rules:
 - EngineHost already creates the sky dome, directional/hemisphere lights with shadows, and a fixed ground collider at y = -0.25 (top surface at y = 0, size 120x0.5x120). Do not duplicate the ground collider or dispose host lights/stage objects in dispose().
 - Register every key rigid body in namedBodies (especially the body referenced by MountedLevel.goal.body) via namedBodies.set(name, body); EngineHost evaluates MountedLevel.goal against namedBodies every frame.
 - Both stepBotAndRules and stepHumanAndRules are required. stepHumanAndRules must update visuals and rule checks for interactive human takeover without applying autonomous bot impulses/motors.
-- Populate controls: ControlBinding[] with clear keyboard/pointer bindings and handle them in onPointerOrKey and stepHumanAndRules.
+- Controls contract: the host passes { type, key, code, ndc } to onPointerOrKey, where code is KeyboardEvent.code (e.g. 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight', 'Space', 'ShiftLeft', 'KeyF'). Declare controls: ControlBinding[] using those exact KeyboardEvent.code values, match input on event.code in onPointerOrKey, and handle every declared binding in onPointerOrKey and stepHumanAndRules so each binding produces a real physical effect. If both WASD and Arrow keys (or multiple ability keys) are declared, every declared binding must work.
+- Mechanics rules (genre-agnostic):
+  1. Directional contact over proximity: interactions must fire only on the specific physical contact the goal implies (e.g. hit from below, stomp from above, direct collision/touch), never on mere distance/proximity checks.
+  2. Finite rewards and spawns: blocks, triggers, pickups, and spawners must be finite (single-payout or bounded state) unless the goal explicitly asks for continuous/infinite spawning.
+  3. Reachability: every interactive object, platform, hazard, and target mentioned in the goal must be physically reachable by both the autonomous bot and a human player.
+- Bot playtest coverage: stepBotAndRules must actively exercise the level's main mechanics on its way to the goal (use the declared jump/ability, hit interactive blocks/switches, engage targets/obstacles) so the playtest verifies mechanics rather than taking a straight run to the goal.
 - Optional breakage & sensor kit helpers may be imported from '../engine/breakageKit':
   createBreakableWall(scene, world, namedBodies, options), createSnapJoint(world, options), createSensorZone(scene, world, options), createLavaSensor(scene, world, options), createGoalSensor(scene, world, options), applyLaunchImpulse(body, options).
 - Import * as THREE from 'three' and RAPIER from '@dimforge/rapier3d-compat'. Keep all generated files as direct children of src/generated/ (with entry module src/generated/activeLevel.ts).
@@ -397,6 +402,50 @@ export function shrinkTelemetry(
   }
 }
 
+export function buildCritiquePrompt(
+  input: FailedRunInput,
+  compactTelemetry: ShrunkTelemetry,
+): string {
+  const failureReason = input.metadata.failureReason ?? 'Goal not reached'
+  return [
+    'Inspect the attached browser playtest video, the compacted frame telemetry, and the current generated files.',
+    'Check declared controls and interactive object behaviour against the goal, not just whether the goal was reached:',
+    '1. TOP PRIORITY — Dead controls: If the failure reason reports dead controls (e.g. "Declared controls did nothing: ..."), treat fixing every dead binding as the #1 priority. Verify that controls are declared with KeyboardEvent.code (e.g. \'KeyW\', \'KeyA\', \'ArrowUp\', \'Space\', \'ShiftLeft\'), onPointerOrKey matches on event.code, and every declared binding (including both WASD and Arrow keys when both are declared) produces a physical action in onPointerOrKey/stepHumanAndRules.',
+    '2. Directional contact over proximity: Check that interactive objects fire on the specific physical contact implied by the goal (hit from below, stomp from above, direct touch/collision), never on mere proximity.',
+    '3. Finite rewards & reachability: Check that rewards/spawns are finite unless the goal requests endless spawning, and that every interactive object is physically reachable by both the bot and a human player.',
+    '4. Bot mechanic coverage: Check that stepBotAndRules exercises the level\'s main mechanics on its way to the goal (uses the declared jump/ability, hits interactive blocks/targets) rather than taking a straight run to the goal.',
+    'Write a concise, plain-text diagnosis citing video timestamps, telemetry events, and exact control/mechanic defects to fix. Do not output code or JSON in this critique step.',
+    `Iteration: ${input.iteration}`,
+    `Failure: ${failureReason}`,
+    `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
+    JSON.stringify(compactTelemetry),
+    `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
+  ].join('\n')
+}
+
+export function buildPatchPrompt(
+  input: FailedRunInput,
+  critiqueText: string,
+  compactTelemetry: ShrunkTelemetry,
+  skillMarkdown = '',
+): string {
+  const failureReason = input.metadata.failureReason ?? 'Goal not reached'
+  return [
+    'Apply the playtest critique below to fix the physics level.',
+    'If the failure reason or critique reports dead controls ("Declared controls did nothing: ..."), treat fixing every declared control binding (matching event.code in onPointerOrKey and applying movement/actions in stepHumanAndRules, including both WASD and Arrow keys if declared) as the top priority.',
+    'Ensure interactive objects trigger only on the specific contact the goal implies (never proximity), keep rewards/spawns finite unless specified otherwise, make every interactive object reachable by both bot and player, and make stepBotAndRules exercise the main mechanics on its way to the goal.',
+    'Return only the files in src/generated/ that changed and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.',
+    `Iteration: ${input.iteration}`,
+    `Failure: ${failureReason}`,
+    `Streamed critique:\n${critiqueText}`,
+    `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
+    JSON.stringify(compactTelemetry),
+    `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
+    ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
+    levelContract.trim(),
+  ].join('\n\n')
+}
+
 export class ArgonOrchestrator {
   private readonly ai: GoogleGenAI
 
@@ -455,15 +504,7 @@ export class ArgonOrchestrator {
     compactTelemetry: ShrunkTelemetry,
     input: FailedRunInput,
   ): Promise<string> {
-    const critiquePrompt = [
-      'Inspect the attached browser playtest video and the compacted frame telemetry.',
-      'Write a concise, plain-text physics diagnosis explaining why the playtest failed, citing video timestamps and key contact/fall telemetry events, and list the specific physical parameter changes needed.',
-      'Do not output code or JSON in this critique step.',
-      `Iteration: ${input.iteration}`,
-      `Failure: ${input.metadata.failureReason ?? 'Goal not reached'}`,
-      `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
-      JSON.stringify(compactTelemetry),
-    ].join('\n')
+    const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
 
     const response = await this.ai.interactions.create({
       model: critiqueModel,
@@ -574,18 +615,7 @@ export class ArgonOrchestrator {
         iteration: input.iteration,
         diagnosis: critiqueText,
       })
-      const patchPrompt = [
-        'Apply the playtest critique below to fix the physics level.',
-        'Return only the files in src/generated/ that changed and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.',
-        `Iteration: ${input.iteration}`,
-        `Failure: ${input.metadata.failureReason ?? 'Goal not reached'}`,
-        `Streamed critique:\n${critiqueText}`,
-        `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
-        JSON.stringify(compactTelemetry),
-        `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
-        ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
-        levelContract.trim(),
-      ].join('\n\n')
+      const patchPrompt = buildPatchPrompt(input, critiqueText, compactTelemetry, skillMarkdown)
 
       const patchStart = performance.now()
       const chainedModelId = resolveChainedInteractionId(input.previousInteractionId, 'model')

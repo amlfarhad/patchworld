@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import RAPIER from '@dimforge/rapier3d-compat'
+import { keyLabel } from '../src/components/levelText.ts'
+import { checkDeclaredControls } from '../src/engine/controlCheck.ts'
 import { evaluateLevelGoal } from '../src/engine/goalEvaluator.ts'
+import * as catapult3 from '../src/fixtures/catapult-3.ts'
 import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.ts'
 
 test('generated writer accepts only direct TypeScript and GLSL children', () => {
@@ -164,3 +168,43 @@ test('preflight ignores unused locals so a working level does not cost a repair 
   }])
   assert.deepEqual(await checkGeneratedTypeScript(files, process.cwd()), [])
 })
+
+test('keyLabel formats KeyboardEvent.code and compound bindings into readable keycaps', () => {
+  assert.equal(keyLabel('ShiftLeft'), 'Shift')
+  assert.equal(keyLabel('KeyW'), 'W')
+  assert.equal(keyLabel('ArrowUp'), '↑')
+  assert.equal(keyLabel('Space'), 'Space')
+  assert.equal(keyLabel('ShiftLeft / F'), 'Shift / F')
+})
+
+test('checkDeclaredControls passes catapult-3 Space control and catches dead bindings', async () => {
+  await RAPIER.init()
+  assert.deepEqual(checkDeclaredControls(catapult3), [])
+
+  const deadLevel = {
+    buildWorld: (_scene: unknown, world: RAPIER.World, namedBodies: Map<string, RAPIER.RigidBody>) => {
+      const ball = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 1, 0))
+      world.createCollider(RAPIER.ColliderDesc.ball(0.5), ball)
+      namedBodies.set('ball', ball)
+      return {
+        stepBotAndRules: () => ({ botState: 'bot', goalReached: true }),
+        stepHumanAndRules: () => ({ botState: 'human', goalReached: false }),
+        onPointerOrKey: (event: { type: string; key?: string; code?: string }) => {
+          if (event.type === 'keydown' && event.code === 'ArrowRight') {
+            ball.setLinvel({ x: 5, y: 0, z: 0 }, true)
+          }
+        },
+        controls: [
+          { key: 'ArrowRight', action: 'Move right' },
+          { key: 'ShiftLeft', action: 'Boost (unwired)' },
+        ],
+        goal: { type: 'above-y' as const, body: 'ball', y: 0 },
+        dispose: () => {},
+      }
+    },
+  }
+
+  const dead = checkDeclaredControls(deadLevel)
+  assert.deepEqual(dead, [{ key: 'ShiftLeft', action: 'Boost (unwired)' }])
+})
+

@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   ArgonOrchestrator,
+  buildCritiquePrompt,
+  buildPatchPrompt,
   buildWorldGenerationPrompt,
   createCritiqueTextMessage,
   extractInteractionText,
@@ -16,6 +18,7 @@ import {
   resolveChainedInteractionId,
   shrinkTelemetry,
   waitForUploadedFileActive,
+  type FailedRunInput,
   type OrchestratorEvent,
   type TelemetryFrame,
 } from './argonOrchestrator.ts'
@@ -310,3 +313,59 @@ test('generateInitialWorld uses structured JSON schema, injects .agents/SKILL.md
     await rm(tempSkill, { force: true })
   }
 })
+
+test('levelContract and generation prompt enforce KeyboardEvent.code controls, genre-agnostic contact/finite-spawn/reachability mechanics, and bot mechanic coverage', () => {
+  const prompt = buildWorldGenerationPrompt('Platformer with jump blocks and moving hazards')
+  // 1. Controls contract with KeyboardEvent.code
+  assert.ok(levelContract.includes('code?: string'))
+  assert.ok(prompt.includes('KeyboardEvent.code'))
+  assert.ok(prompt.includes("'KeyW'"))
+  assert.ok(prompt.includes("'KeyA'"))
+  assert.ok(prompt.includes("'ArrowUp'"))
+  assert.ok(prompt.includes("'Space'"))
+  assert.ok(prompt.includes("'ShiftLeft'"))
+  assert.ok(prompt.includes('event.code'))
+  assert.ok(prompt.includes('If both WASD and Arrow keys'))
+
+  // 2. Genre-agnostic mechanics rules
+  assert.ok(prompt.includes('hit from below, stomp from above'))
+  assert.ok(prompt.includes('never on mere distance/proximity checks'))
+  assert.ok(prompt.includes('Finite rewards and spawns'))
+  assert.ok(prompt.includes('reachable by both the autonomous bot and a human player'))
+
+  // 3. Bot exercises main mechanics
+  assert.ok(prompt.includes("stepBotAndRules must actively exercise the level's main mechanics"))
+  assert.ok(prompt.includes('rather than taking a straight run to the goal'))
+})
+
+test('buildCritiquePrompt and buildPatchPrompt audit declared controls and object behaviour and treat dead controls as top priority', () => {
+  const failedRun: FailedRunInput = {
+    videoBytes: new Uint8Array([1, 2, 3]),
+    metadata: {
+      type: 'PLAYTEST_FAILED_PAYLOAD',
+      runId: 'run_dead_controls',
+      frameCount: 60,
+      failureReason: 'Declared controls did nothing: KeyW, ShiftLeft',
+      telemetry: [],
+    },
+    currentFiles: [
+      { path: 'src/generated/activeLevel.ts', content: 'export const controls = [{ key: "KeyW", action: "Jump" }];' },
+    ],
+    iteration: 2,
+  }
+  const compactTelemetry = shrinkTelemetry(failedRun.metadata.telemetry)
+  const critiquePrompt = buildCritiquePrompt(failedRun, compactTelemetry)
+  assert.ok(critiquePrompt.includes('Declared controls did nothing: KeyW, ShiftLeft'))
+  assert.ok(critiquePrompt.includes('TOP PRIORITY — Dead controls'))
+  assert.ok(critiquePrompt.includes('Check declared controls and interactive object behaviour against the goal'))
+  assert.ok(critiquePrompt.includes('event.code'))
+  assert.ok(critiquePrompt.includes('never on mere proximity'))
+  assert.ok(critiquePrompt.includes('src/generated/activeLevel.ts'))
+
+  const patchPrompt = buildPatchPrompt(failedRun, 'KeyW and ShiftLeft were ignored in onPointerOrKey.', compactTelemetry)
+  assert.ok(patchPrompt.includes('Declared controls did nothing: KeyW, ShiftLeft'))
+  assert.ok(patchPrompt.includes('top priority'))
+  assert.ok(patchPrompt.includes('event.code'))
+  assert.ok(patchPrompt.includes('stepBotAndRules exercise the main mechanics'))
+})
+
