@@ -208,3 +208,82 @@ test('checkDeclaredControls passes catapult-3 Space control and catches dead bin
   assert.deepEqual(dead, [{ key: 'ShiftLeft', action: 'Boost (unwired)' }])
 })
 
+test('preflight accepts generated modules importing from ../engine/assetKit', async () => {
+  const files = validateGeneratedFiles([{
+    path: 'src/generated/activeLevel.ts',
+    content: `
+      import type { GeneratedLevelModule } from '../engine/types'
+      import {
+        createCharacter,
+        createEnemy,
+        createTree,
+        createRock,
+        createCrate,
+        createCoin,
+        createItemBlock,
+        createGoalFlag,
+        createPlatformTile,
+        createBodyWithCollider,
+        scatter,
+        createPlayerController,
+        collectOnce,
+        hitFromBelow,
+      } from '../engine/assetKit'
+
+      export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world, bodies) => {
+        const playerMesh = createCharacter({ position: [0, 1, 0] })
+        const enemyMesh = createEnemy({ position: [2, 1, 0] })
+        const crateMesh = createCrate({ position: [1, 0.5, 0] })
+        const coinMesh = createCoin({ position: [1.5, 1.2, 0] })
+        const blockMesh = createItemBlock({ position: [0, 2.5, 0] })
+        const flagMesh = createGoalFlag({ position: [5, 0, 0] })
+        const tileMesh = createPlatformTile({ position: [0, 0, 0], size: [4, 0.5, 2] })
+        scene.add(playerMesh, enemyMesh, crateMesh, coinMesh, blockMesh, flagMesh, tileMesh)
+        scatter(scene, createTree(), 8, { min: [-12, -12], max: [12, 12], minRadius: 4 }, 42)
+        scatter(scene, createRock(), 6, { min: [-10, -10], max: [10, 10], minRadius: 3 }, 99)
+
+        const playerBody = createBodyWithCollider(world, {
+          type: 'dynamic',
+          shape: 'capsule',
+          position: [0, 1, 0],
+          halfHeight: 0.3,
+          radius: 0.3,
+          lockRotations: true,
+        })
+        bodies.set('player', playerBody)
+
+        const controller = createPlayerController(world, playerBody)
+        const coinTrigger = collectOnce(coinMesh)
+        const blockTrigger = hitFromBelow(blockMesh)
+
+        return {
+          stepBotAndRules: () => {
+            controller.syncMesh(playerMesh)
+            coinTrigger.check(playerBody)
+            blockTrigger.check(playerBody)
+            return { botState: 'run', goalReached: false }
+          },
+          stepHumanAndRules: () => {
+            controller.step()
+            controller.syncMesh(playerMesh)
+            coinTrigger.check(playerBody)
+            blockTrigger.check(playerBody)
+            return { botState: 'human', goalReached: false }
+          },
+          onPointerOrKey: (event) => controller.onPointerOrKey(event),
+          controls: [
+            { key: 'ArrowRight', action: 'Run right' },
+            { key: 'Space', action: 'Jump' },
+          ],
+          goal: { type: 'near-point', body: 'player', target: [5, 1, 0], radius: 1.2 },
+          dispose: () => {},
+        }
+      }
+    `,
+  }])
+
+  const diagnostics = await checkGeneratedTypeScript(files, process.cwd())
+  assert.deepEqual(diagnostics, [])
+})
+
+

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import RAPIER from '@dimforge/rapier3d-compat'
 import { AutonomousLoop } from './AutonomousLoop'
 import { checkDeclaredControls } from './controlCheck'
@@ -23,6 +24,7 @@ export class EngineHost {
   private levelHandle: MountedLevel | null = null
   private levelRoot: THREE.Group | null = null
   private stageRoot: THREE.Group | null = null
+  private envRenderTarget: THREE.WebGLRenderTarget | null = null
   private unsubscribeLoopState: (() => void) | null = null
   private animationFrame = 0
   private frameIndex = 0
@@ -40,8 +42,17 @@ export class EngineHost {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.05
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    const pmremGenerator = new THREE.PMREMGenerator(this.renderer)
+    const roomEnvironment = new RoomEnvironment()
+    this.envRenderTarget = pmremGenerator.fromScene(roomEnvironment, 0.04)
+    this.scene.environment = this.envRenderTarget.texture
+    roomEnvironment.dispose()
+    pmremGenerator.dispose()
     this.camera.position.set(0, 3, 8)
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
@@ -171,6 +182,9 @@ export class EngineHost {
       this.disposeObjectTree(this.stageRoot)
       this.stageRoot = null
     }
+    this.scene.environment = null
+    this.envRenderTarget?.dispose()
+    this.envRenderTarget = null
     this.autonomousLoop.dispose()
     this.eventQueue?.free()
     this.renderer.dispose()
