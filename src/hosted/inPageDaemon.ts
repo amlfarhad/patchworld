@@ -81,10 +81,9 @@ class InPageDaemon {
     return this.mock ? this.demo : new LiveOrchestrator(getLivePasscode())
   }
 
-  /** The conversation to continue. A demo replay's id (demo-N) is never sent to Gemini, which rejects it. */
+  /** The Gemini conversation to continue. Demo patches never set one (see applyPatch), so a demo-N id never reaches Gemini. */
   private chainId(): string | undefined {
-    const id = this.previousInteractionId
-    return !this.mock && id?.startsWith('demo-') ? undefined : id
+    return this.mock ? undefined : this.previousInteractionId
   }
 
   private readonly demo = new DemoOrchestrator()
@@ -148,7 +147,8 @@ class InPageDaemon {
     patch.files.forEach((file) => merged.set(file.path, file.content))
     this.currentFiles = [...merged].map(([path, content]) => ({ path, content }))
     this.iteration += 1
-    this.previousInteractionId = patch.interactionId
+    // A demo patch replaces the level Gemini last saw, so the next live call starts a fresh conversation.
+    this.previousInteractionId = patch.interactionId.startsWith('demo-') ? undefined : patch.interactionId
     this.history = [...this.history, { iteration: this.iteration, outcome: 'pending', files: patch.files.map((file) => file.path), diagnosis: patch.diagnosis, timestamp: new Date().toISOString() }]
     this.publishHistory()
     this.deliver({ type: 'patch-applied', files: patch.files.map((file) => file.path), iteration: this.iteration, changes })

@@ -156,7 +156,7 @@ export class ArgonOrchestrator implements WorldOrchestrator {
     const telemetry = compactTelemetry(input.metadata.telemetry)
     const critiquePrompt = `You are reviewing an autonomous playtest of a generated physics level. The attached video is the bot's attempt; the telemetry below was recorded alongside it.
 Failure reported by the level: ${input.metadata.failureReason ?? 'Goal not reached before the time limit'}
-${input.iteration > 1 ? `This is attempt ${input.iteration}. Every earlier attempt of this level is already in this conversation: its video, telemetry, code and your critique. Compare this run with them, say what changed, and do not repeat a fix that already failed.\n` : ''}Telemetry (${input.metadata.frameCount} recorded frames, positions in metres, compacted):
+${input.iteration > 1 && input.previousInteractionId ? `This is attempt ${input.iteration}. Every earlier attempt of this level is already in this conversation: its video, telemetry, code and your critique. Compare this run with them, say what changed, and do not repeat a fix that already failed.\n` : ''}Telemetry (${input.metadata.frameCount} recorded frames, positions in metres, compacted):
 ${JSON.stringify(telemetry)}
 Current level code:
 ${formatFiles(input.currentFiles)}
