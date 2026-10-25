@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { evaluateLevelGoal } from '../src/engine/goalEvaluator.ts'
 import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.ts'
 
 test('generated writer accepts only direct TypeScript and GLSL children', () => {
@@ -115,4 +116,31 @@ test('preflight accepts generated modules importing from ../engine/breakageKit',
   const diagnostics = await checkGeneratedTypeScript(files, process.cwd())
   assert.deepEqual(diagnostics, [])
 })
+
+test('evaluateLevelGoal checks declared goal against named body positions', () => {
+  const bodies = new Map([
+    ['ball', { translation: () => ({ x: 4, y: -2, z: 0.5 }) }],
+  ])
+
+  assert.equal(evaluateLevelGoal({ type: 'below-y', body: 'ball', y: -1 }, bodies), true)
+  assert.equal(evaluateLevelGoal({ type: 'below-y', body: 'ball', y: -3 }, bodies), false)
+  assert.equal(evaluateLevelGoal({ type: 'above-y', body: 'ball', y: -3 }, bodies), true)
+  assert.equal(
+    evaluateLevelGoal({ type: 'in-region', body: 'ball', min: [3, -3, 0], max: [5, -1, 1] }, bodies),
+    true,
+  )
+  assert.equal(
+    evaluateLevelGoal({ type: 'in-region', body: 'ball', min: [0, 0, 0], max: [2, 2, 2] }, bodies),
+    false,
+  )
+  assert.equal(
+    evaluateLevelGoal({ type: 'near-point', body: 'ball', target: [4, -2, 0], radius: 1 }, bodies),
+    true,
+  )
+  assert.equal(
+    evaluateLevelGoal({ type: 'near-point', body: 'missing', target: [4, -2, 0], radius: 10 }, bodies),
+    false,
+  )
+})
+
 
