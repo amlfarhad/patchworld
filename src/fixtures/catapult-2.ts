@@ -121,6 +121,8 @@ export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world, nam
     onPointerOrKey: (event) => {
       if ((event.type === 'keydown' && event.key === ' ') || event.type === 'pointerdown') launch()
     },
+    controls: [{ key: 'Space', action: 'Fire the catapult' }],
+    goal: { type: 'below-y', body: 'boss', y: 2.4 },
     dispose: () => {},
   }
 }

@@ -19,6 +19,8 @@ export class AutonomousLoop {
   private mountedWhileUploading = false
   /** A level mounted before the socket opened (e.g. after Vite reloaded the page); tell the daemon once registered. */
   private unreportedMount = false
+  /** The current human attempt already ended with failedEarly; report the loss once per attempt. */
+  private humanLossReported = false
   private reconnectTimer: number | null = null
   private disposed = false
   private readonly listeners = new Set<(state: LoopState) => void>()
@@ -65,6 +67,7 @@ export class AutonomousLoop {
   }
 
   onLevelMounted(): void {
+    this.humanLossReported = false
     this.unreportedMount = !this.send({ type: 'level-mounted' })
     if (this.enabled && this.state === 'awaiting-patch') this.beginRun()
     else if (this.enabled && this.state === 'uploading') this.mountedWhileUploading = true
@@ -74,6 +77,7 @@ export class AutonomousLoop {
 
   takeOver(): void {
     this.enabled = false
+    this.humanLossReported = false
     this.runGeneration += 1
     this.mountedWhileUploading = false
     if (this.recorder?.isRecording) void this.recorder.stop().catch(() => {})
@@ -112,6 +116,13 @@ export class AutonomousLoop {
     namedBodies: Map<string, RAPIER.RigidBody>,
     contacts: ContactSnapshot[],
   ): void {
+    if (this.isHumanControlled) {
+      if (result?.failedEarly && !this.humanLossReported) {
+        this.humanLossReported = true
+        window.dispatchEvent(new CustomEvent('argon:human-lost', { detail: { reason: result.failedEarly } }))
+      }
+      return
+    }
     if (this.state !== 'running' || !result) return
     this.runTicks += 1
     const shouldCapture = this.runTicks % 2 === 0 || result.goalReached || Boolean(result.failedEarly)
