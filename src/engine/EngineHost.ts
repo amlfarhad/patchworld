@@ -71,6 +71,15 @@ export class EngineHost {
       if (typeof nextHandle.stepBotAndRules !== 'function') {
         throw new TypeError('Generated level must return a stepBotAndRules function')
       }
+      if (typeof nextHandle.stepHumanAndRules !== 'function') {
+        throw new TypeError('Generated level must return a stepHumanAndRules function')
+      }
+      if (!Array.isArray(nextHandle.controls)) {
+        throw new TypeError('Generated level must return a controls list')
+      }
+      if (!nextHandle.goal || typeof nextHandle.goal.type !== 'string' || typeof nextHandle.goal.body !== 'string') {
+        throw new TypeError('Generated level must return a valid goal object')
+      }
       const newObjects = this.scene.children.filter((child) => !existingChildren.has(child))
       if (newObjects.length > 0) nextRoot.add(...newObjects)
       this.scene.add(nextRoot)
@@ -94,7 +103,16 @@ export class EngineHost {
     this.frameIndex = 0
     this.accumulator = 0
     this.currentModule = levelModule
-    window.dispatchEvent(new CustomEvent('argon:level-mounted', { detail: { hasLevel: nextBodies.size > 0 || nextRoot.children.length > 0, bodyCount: nextBodies.size } }))
+    window.dispatchEvent(
+      new CustomEvent('argon:level-mounted', {
+        detail: {
+          hasLevel: nextBodies.size > 0 || nextRoot.children.length > 0,
+          bodyCount: nextBodies.size,
+          controls: nextHandle.controls,
+          goal: nextHandle.goal,
+        },
+      }),
+    )
     this.autonomousLoop.onLevelMounted()
   }
 
