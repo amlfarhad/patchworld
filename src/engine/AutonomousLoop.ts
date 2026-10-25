@@ -2,6 +2,8 @@ import type RAPIER from '@dimforge/rapier3d-compat'
 import { encodePlaytestPacket, type BrowserMessage, type DaemonMessage, type PlaytestFailedMetadata } from '../shared/protocol'
 import { SynchronizedRecorder } from './TelemetryRecorder'
 import type { ContactSnapshot, MountedLevel, StepResult } from './types'
+import { InPageSocket } from '../hosted/inPageDaemon'
+import { isHosted } from '../hosted/mode'
 
 type LoopState = 'idle' | 'running' | 'uploading' | 'awaiting-patch' | 'complete' | 'error' | 'human'
 
@@ -34,7 +36,8 @@ export class AutonomousLoop {
 
   connect(): void {
     if (this.disposed || this.socket || typeof WebSocket === 'undefined') return
-    const socket = new WebSocket(this.socketUrl)
+    // Hosted builds have no local sync daemon; the loop runs in the page instead.
+    const socket = isHosted ? new InPageSocket() as unknown as WebSocket : new WebSocket(this.socketUrl)
     socket.binaryType = 'arraybuffer'
     socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'register', role: 'browser' })))
     socket.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => this.handleMessage(event.data))

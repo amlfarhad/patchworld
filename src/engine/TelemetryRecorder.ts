@@ -1,5 +1,6 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
 import type { ContactSnapshot } from './types'
+import { isHosted } from '../hosted/mode'
 
 export interface FrameSnapshot {
   frame: number
@@ -49,7 +50,8 @@ export class SynchronizedRecorder {
     try {
       this.mediaRecorder = new MediaRecorder(this.stream, {
         mimeType,
-        videoBitsPerSecond: 4_000_000,
+        // Hosted uploads go through a serverless function with a 4.5 MB request limit.
+        videoBitsPerSecond: isHosted ? 1_200_000 : 4_000_000,
       })
       this.mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) this.chunks.push(event.data)
