@@ -1,0 +1,20 @@
+{
+  "goal": "Build a catapult that launches a boulder through a bridge and drops a red boss cube into a lava pit.",
+  "notes": "Recorded from a live Gemini run (2026-10-25). Quick-start presets replay it instantly instead of building live.",
+  "steps": [
+    {
+      "files": {
+        "src/generated/activeLevel.ts": "cached-catapult-01-activeLevel.level"
+      },
+      "diagnosis": "Implemented a complete physics sandbox level featuring a hinged catapult arm with a siege boulder, an overhead tension upgrade block triggered from below, a stomp-activated launch pedal, a multi-piece destructible timber bridge spanning a molten lava caldera, and a Red Boss Cube perched atop the center bridge span.",
+      "skillContent": "- Anchor destructible bridge planks and support struts with Rapier fixed joints to static piers and break them on direct boulder collision events so the structure remains rock-solid prior to impact and collapses cleanly when struck.\n- Place a containment backstop wall on the far side of target pits aligned with the projectile line of fire so high-momentum impacts funnel the target body directly downward into the hazard zone."
+    },
+    {
+      "files": {
+        "src/generated/activeLevel.ts": "cached-catapult-02-activeLevel.level"
+      },
+      "diagnosis": "Fixed two critical issues identified in Iteration 1: (1) At t=0 (00:00), the boulder overlapped the catapult bucket side-guard colliders and was ejected with linvel [2.01, 2.32, 0.56], rolling across the ground prematurely. Replaced the overlapping cup colliders with a non-overlapping beam collider and a fixed cradle latch joint that holds the boulder securely until the catapult arm swings up to its release angle. (2) From frames 1-240 (00:00-00:07), the bot was blocked along its approach path by a support post at (-13.5, 1.9, 3.8) and raised floor pad edges. Aligned the player start (-15.2, 0.65, 2.8), tension block (-13.5, 2.85, 2.8), and launch pedal (-10.2, 0.22, 2.8) along an unobstructed, flush runway with support posts offset outside the corridor.",
+      "skillContent": "- Anchor destructible bridge planks and support struts with Rapier fixed joints to static piers and break them on direct boulder collision events so the structure remains rock-solid prior to impact and collapses cleanly when struck.\n- Place a containment backstop wall on the far side of target pits aligned with the projectile line of fire so high-momentum impacts funnel the target body directly downward into the hazard zone.\n- Secure projectiles inside hinged catapult cradles using a temporary fixed impulse joint (and non-overlapping colliders at t=0) until the throwing arm reaches its release angle, preventing initial collider penetration from ejecting the projectile at frame 1.\n- Keep the bot navigation corridor between spawn, overhead blocks, and floor pedals completely free of support posts and raised floor step lips so horizontal velocity movement never wedges against static geometry."
+    }
+  ]
+}

@@ -1,0 +1,907 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import type {
+  ControlBinding,
+  LevelGoal,
+  MountedLevel,
+  StepResult,
+} from '../engine/types';
+
+interface RelayGate {
+  name: string;
+  sensorHandle: number;
+  body: RAPIER.RigidBody;
+  ringMesh: THREE.Mesh;
+  ringMat: THREE.MeshStandardMaterial;
+  activated: boolean;
+  boostSpeed: number;
+}
+
+interface SealStrut {
+  name: string;
+  body: RAPIER.RigidBody;
+  colliderHandle: number;
+  mesh: THREE.Mesh;
+  joint: RAPIER.ImpulseJoint | null;
+}
+
+export function buildWorld(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+  eventQueue: RAPIER.EventQueue,
+): MountedLevel {
+  const createdObjects: THREE.Object3D[] = [];
+  const createdGeometries: THREE.BufferGeometry[] = [];
+  const createdMaterials: THREE.Material[] = [];
+  const createdBodies: RAPIER.RigidBody[] = [];
+  const createdJoints: RAPIER.ImpulseJoint[] = [];
+  const registeredNames: string[] = [];
+
+  const trackObject = <T extends THREE.Object3D>(obj: T): T => {
+    scene.add(obj);
+    createdObjects.push(obj);
+    return obj;
+  };
+
+  const trackGeometry = <T extends THREE.BufferGeometry>(geo: T): T => {
+    createdGeometries.push(geo);
+    return geo;
+  };
+
+  const trackMaterial = <T extends THREE.Material>(mat: T): T => {
+    createdMaterials.push(mat);
+    return mat;
+  };
+
+  const registerBody = (name: string, body: RAPIER.RigidBody): RAPIER.RigidBody => {
+    createdBodies.push(body);
+    namedBodies.set(name, body);
+    registeredNames.push(name);
+    return body;
+  };
+
+  // Orbital plane and massive sphere constants
+  const ORBIT_Y = 3.5;
+  const PLANET_X = -2.0;
+  const PLANET_Z = 0.0;
+  const PLANET_RADIUS = 2.2;
+  const ORBIT_RADIUS = 6.5;
+  const GM = 680.0;
+
+  // Target ring and capture chamber constants
+  const RING_X = 11.0;
+  const RING_Y = ORBIT_Y;
+  const RING_Z = 6.2;
+  const GOAL_CENTER: [number, number, number] = [14.0, ORBIT_Y, RING_Z];
+
+  // 1. Visual Astrometric Deck on the floor (non-obstructing visual reference)
+  const deckGroup = trackObject(new THREE.Group());
+  const deckMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x0b132b,
+      roughness: 0.7,
+      metalness: 0.3,
+    }),
+  );
+  const deckGeo = trackGeometry(new THREE.CylinderGeometry(15.5, 16.0, 0.08, 48));
+  const deckMesh = new THREE.Mesh(deckGeo, deckMat);
+  deckMesh.position.set(2.0, 0.04, 1.0);
+  deckMesh.receiveShadow = true;
+  deckGroup.add(deckMesh);
+
+  // Glowing orbital track projection ring on the floor and at orbital plane
+  const orbitRingMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x00e5ff,
+      emissive: 0x0088aa,
+      emissiveIntensity: 0.8,
+      roughness: 0.3,
+      metalness: 0.6,
+    }),
+  );
+  const orbitTrackGeo = trackGeometry(new THREE.TorusGeometry(ORBIT_RADIUS, 0.06, 12, 72));
+  const orbitTrackFloor = new THREE.Mesh(orbitTrackGeo, orbitRingMat);
+  orbitTrackFloor.rotation.x = Math.PI / 2;
+  orbitTrackFloor.position.set(PLANET_X, 0.1, PLANET_Z);
+  deckGroup.add(orbitTrackFloor);
+
+  // Subtle guide ring at orbital altitude
+  const orbitHaloMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.45,
+      transparent: true,
+      opacity: 0.35,
+    }),
+  );
+  const orbitHaloGeo = trackGeometry(new THREE.TorusGeometry(ORBIT_RADIUS, 0.035, 10, 72));
+  const orbitHaloMesh = new THREE.Mesh(orbitHaloGeo, orbitHaloMat);
+  orbitHaloMesh.rotation.x = Math.PI / 2;
+  orbitHaloMesh.position.set(PLANET_X, ORBIT_Y - 0.55, PLANET_Z);
+  deckGroup.add(orbitHaloMesh);
+
+  // Escape tangent lane indicator on floor
+  const tangentLaneGeo = trackGeometry(new THREE.BoxGeometry(16.5, 0.04, 1.6));
+  const tangentLaneMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.55,
+      roughness: 0.4,
+    }),
+  );
+  const tangentLaneMesh = new THREE.Mesh(tangentLaneGeo, tangentLaneMat);
+  tangentLaneMesh.position.set(5.5, 0.1, RING_Z);
+  deckGroup.add(tangentLaneMesh);
+
+  // 2. Massive Central Sphere (Gravity Well Core)
+  const planetBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(PLANET_X, ORBIT_Y, PLANET_Z);
+  const planetBody = registerBody('massiveSphere', world.createRigidBody(planetBodyDesc));
+  world.createCollider(
+    RAPIER.ColliderDesc.ball(PLANET_RADIUS)
+      .setRestitution(0.85)
+      .setFriction(0.1)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    planetBody,
+  );
+
+  const planetGroup = trackObject(new THREE.Group());
+  planetGroup.position.set(PLANET_X, ORBIT_Y, PLANET_Z);
+
+  const planetGeo = trackGeometry(new THREE.SphereGeometry(PLANET_RADIUS, 36, 36));
+  const planetMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x312e81,
+      emissive: 0x4338ca,
+      emissiveIntensity: 0.55,
+      roughness: 0.25,
+      metalness: 0.7,
+    }),
+  );
+  const planetMesh = new THREE.Mesh(planetGeo, planetMat);
+  planetMesh.castShadow = true;
+  planetMesh.receiveShadow = true;
+  planetGroup.add(planetMesh);
+
+  // Planetary accretion rings
+  const planetRingGeo = trackGeometry(new THREE.TorusGeometry(PLANET_RADIUS * 1.38, 0.12, 16, 48));
+  const planetRingMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xa855f7,
+      emissive: 0x7e22ce,
+      emissiveIntensity: 0.75,
+      roughness: 0.2,
+      metalness: 0.8,
+    }),
+  );
+  const planetRingMesh = new THREE.Mesh(planetRingGeo, planetRingMat);
+  planetRingMesh.rotation.x = Math.PI / 2.2;
+  planetRingMesh.rotation.y = 0.25;
+  planetGroup.add(planetRingMesh);
+
+  // Pedestal under the massive sphere (kept below y = 1.3 so orbital plane is 100% clear)
+  const pedestalGeo = trackGeometry(new THREE.CylinderGeometry(1.1, 1.8, 1.2, 24));
+  const pedestalMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.6,
+      metalness: 0.5,
+    }),
+  );
+  const pedestalMesh = new THREE.Mesh(pedestalGeo, pedestalMat);
+  pedestalMesh.position.set(PLANET_X, 0.6, PLANET_Z);
+  pedestalMesh.castShadow = true;
+  pedestalMesh.receiveShadow = true;
+  deckGroup.add(pedestalMesh);
+
+  // 3. Three Finite Orbital Relay Gates along the orbit (East, North, West)
+  const relayConfigs: Array<{
+    name: string;
+    angle: number;
+    rotY: number;
+    boostSpeed: number;
+  }> = [
+    { name: 'relayAlpha', angle: 0, rotY: 0, boostSpeed: 11.4 },
+    { name: 'relayBeta', angle: Math.PI / 2, rotY: Math.PI / 2, boostSpeed: 13.0 },
+    { name: 'relayGamma', angle: Math.PI, rotY: 0, boostSpeed: 14.8 },
+  ];
+
+  const relayGates: RelayGate[] = [];
+  const relayGeo = trackGeometry(new THREE.TorusGeometry(1.25, 0.12, 14, 32));
+
+  for (const cfg of relayConfigs) {
+    const rx = PLANET_X + ORBIT_RADIUS * Math.cos(cfg.angle);
+    const rz = PLANET_Z - ORBIT_RADIUS * Math.sin(cfg.angle);
+
+    const rBody = registerBody(
+      cfg.name,
+      world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(rx, ORBIT_Y, rz)),
+    );
+    const rCollider = world.createCollider(
+      RAPIER.ColliderDesc.ball(1.15)
+        .setSensor(true)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      rBody,
+    );
+
+    const rMat = trackMaterial(
+      new THREE.MeshStandardMaterial({
+        color: 0x00f5d4,
+        emissive: 0x00bbf9,
+        emissiveIntensity: 0.9,
+        roughness: 0.2,
+        metalness: 0.8,
+      }),
+    );
+    const rMesh = trackObject(new THREE.Mesh(relayGeo, rMat));
+    rMesh.position.set(rx, ORBIT_Y, rz);
+    rMesh.rotation.y = cfg.rotY;
+    rMesh.castShadow = true;
+
+    relayGates.push({
+      name: cfg.name,
+      sensorHandle: rCollider.handle,
+      body: rBody,
+      ringMesh: rMesh,
+      ringMat: rMat,
+      activated: false,
+      boostSpeed: cfg.boostSpeed,
+    });
+  }
+
+  // 4. Slingshot Escape Corridor Guide Rails & Target Ring Frame
+  const railMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      emissive: 0x0f172a,
+      roughness: 0.4,
+      metalness: 0.7,
+    }),
+  );
+
+  const createGuideWall = (
+    name: string,
+    x: number,
+    y: number,
+    z: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    rotY = 0,
+    restitution = 0.6,
+    friction = 0.05,
+  ): RAPIER.RigidBody => {
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+    const bDesc = RAPIER.RigidBodyDesc.fixed()
+      .setTranslation(x, y, z)
+      .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+    const body = registerBody(name, world.createRigidBody(bDesc));
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+        .setRestitution(restitution)
+        .setFriction(friction),
+      body,
+    );
+    const geo = trackGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2));
+    const mesh = trackObject(new THREE.Mesh(geo, railMat));
+    mesh.position.set(x, y, z);
+    mesh.quaternion.copy(q);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return body;
+  };
+
+  // Outer South Slingshot Deflector Rail (guides probe cleanly into the +X escape corridor)
+  createGuideWall('southDeflectorRail', 4.2, ORBIT_Y, 8.2, 6.8, 0.85, 0.25, -0.04, 0.75, 0.0);
+  // Inner North Escape Corridor Rail (starts East of the orbit so it never blocks the orbit circle)
+  createGuideWall('northCorridorRail', 7.8, ORBIT_Y, 4.3, 3.2, 0.85, 0.25, 0.02, 0.75, 0.0);
+
+  // 5. Target Ring at (RING_X, RING_Y, RING_Z)
+  const ringFrameBody = registerBody(
+    'targetRing',
+    world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(RING_X, RING_Y, RING_Z)),
+  );
+  const ringSensorCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(1.9)
+      .setSensor(true)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    ringFrameBody,
+  );
+  const targetRingSensorHandle = ringSensorCollider.handle;
+
+  const targetRingGroup = trackObject(new THREE.Group());
+  targetRingGroup.position.set(RING_X, RING_Y, RING_Z);
+
+  const targetRingGeo = trackGeometry(new THREE.TorusGeometry(2.3, 0.26, 20, 48));
+  const targetRingMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfbbf24,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.95,
+      roughness: 0.2,
+      metalness: 0.85,
+    }),
+  );
+  const targetRingMesh = new THREE.Mesh(targetRingGeo, targetRingMat);
+  targetRingMesh.rotation.y = Math.PI / 2;
+  targetRingMesh.castShadow = true;
+  targetRingGroup.add(targetRingMesh);
+
+  // Target Ring support arch base (below the ring so aperture is completely clear)
+  const ringBaseGeo = trackGeometry(new THREE.CylinderGeometry(0.45, 0.8, 1.2, 16));
+  const ringBaseMesh = trackObject(new THREE.Mesh(ringBaseGeo, pedestalMat));
+  ringBaseMesh.position.set(RING_X, 0.6, RING_Z);
+
+  // Breakable Crystalline Resonance Seal Struts anchored inside the Target Ring with fixed joints
+  const sealStruts: SealStrut[] = [];
+  const sealMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.7,
+      roughness: 0.15,
+      metalness: 0.3,
+      transparent: true,
+      opacity: 0.82,
+    }),
+  );
+  const sealOffsets: Array<[number, number]> = [
+    [0, 0.55],
+    [0, -0.55],
+    [0.55, 0],
+    [-0.55, 0],
+  ];
+  const sealGeo = trackGeometry(new THREE.BoxGeometry(0.14, 0.85, 0.85));
+
+  sealOffsets.forEach(([dy, dz], idx) => {
+    const sx = RING_X;
+    const sy = RING_Y + dy;
+    const sz = RING_Z + dz;
+    const sName = `ringSeal_${idx}`;
+    const sBody = registerBody(
+      sName,
+      world.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic()
+          .setTranslation(sx, sy, sz)
+          .setGravityScale(0.0)
+          .setLinearDamping(0.4)
+          .setAngularDamping(0.4),
+      ),
+    );
+    const sCol = world.createCollider(
+      RAPIER.ColliderDesc.cuboid(0.07, 0.4, 0.4)
+        .setDensity(0.04)
+        .setRestitution(0.2)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      sBody,
+    );
+
+    const fixedJointParams = RAPIER.JointData.fixed(
+      { x: 0, y: dy, z: dz },
+      { x: 0, y: 0, z: 0, w: 1 },
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+    );
+    const joint = world.createImpulseJoint(fixedJointParams, ringFrameBody, sBody, true);
+    createdJoints.push(joint);
+
+    const sMesh = trackObject(new THREE.Mesh(sealGeo, sealMat));
+    sMesh.position.set(sx, sy, sz);
+    sMesh.castShadow = true;
+
+    sealStruts.push({
+      name: sName,
+      body: sBody,
+      colliderHandle: sCol.handle,
+      mesh: sMesh,
+      joint,
+    });
+  });
+
+  // 6. Containment Backstop & Escape Capture Chamber on the far side of the Target Ring
+  createGuideWall('captureBackstop', 16.3, ORBIT_Y, RING_Z, 0.45, 2.2, 2.8, 0, 0.05, 0.9);
+  createGuideWall('captureSideNorth', 14.0, ORBIT_Y, RING_Z - 2.5, 2.5, 1.8, 0.3, 0, 0.1, 0.8);
+  createGuideWall('captureSideSouth', 14.0, ORBIT_Y, RING_Z + 2.5, 2.5, 1.8, 0.3, 0, 0.1, 0.8);
+
+  // Glowing Goal Capture Beacon inside the chamber
+  const goalBeaconGeo = trackGeometry(new THREE.CylinderGeometry(1.6, 1.8, 0.25, 32));
+  const goalBeaconMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x10b981,
+      emissive: 0x059669,
+      emissiveIntensity: 0.85,
+      roughness: 0.3,
+      metalness: 0.6,
+    }),
+  );
+  const goalBeaconMesh = trackObject(new THREE.Mesh(goalBeaconGeo, goalBeaconMat));
+  goalBeaconMesh.position.set(GOAL_CENTER[0], 0.15, GOAL_CENTER[2]);
+
+  // 7. Small Orbiting Sphere ('probe')
+  const PROBE_RADIUS = 0.55;
+  // Spawn at South-East of the orbit (-0.32 * PI) moving counter-clockwise toward East -> North -> West -> South
+  const START_ANGLE = -0.32 * Math.PI;
+  const startX = PLANET_X + ORBIT_RADIUS * Math.cos(START_ANGLE);
+  const startZ = PLANET_Z - ORBIT_RADIUS * Math.sin(START_ANGLE);
+  const INITIAL_ORBIT_SPEED = 10.0;
+  const startVx = -Math.sin(START_ANGLE) * INITIAL_ORBIT_SPEED;
+  const startVz = -Math.cos(START_ANGLE) * INITIAL_ORBIT_SPEED;
+
+  const probeDesc = RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(startX, ORBIT_Y, startZ)
+    .setLinvel(startVx, 0, startVz)
+    .setGravityScale(0.0)
+    .setLinearDamping(0.0)
+    .setAngularDamping(0.15)
+    .setCcdEnabled(true);
+  const probeBody = registerBody('probe', world.createRigidBody(probeDesc));
+  const probeCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(PROBE_RADIUS)
+      .setDensity(1.2)
+      .setRestitution(0.6)
+      .setFriction(0.05)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    probeBody,
+  );
+  const probeColliderHandle = probeCollider.handle;
+
+  const probeGeo = trackGeometry(new THREE.SphereGeometry(PROBE_RADIUS, 28, 28));
+  const probeMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xf8fafc,
+      emissive: 0x38bdf8,
+      emissiveIntensity: 0.65,
+      roughness: 0.15,
+      metalness: 0.85,
+    }),
+  );
+  const probeMesh = trackObject(new THREE.Mesh(probeGeo, probeMat));
+  probeMesh.position.set(startX, ORBIT_Y, startZ);
+  probeMesh.castShadow = true;
+
+  // Breadcrumb trail spheres to visualize orbital & slingshot path
+  const TRAIL_COUNT = 26;
+  const trailMeshes: THREE.Mesh[] = [];
+  const trailGeo = trackGeometry(new THREE.SphereGeometry(0.14, 10, 10));
+  const trailMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.9,
+      transparent: true,
+      opacity: 0.7,
+    }),
+  );
+  for (let i = 0; i < TRAIL_COUNT; i++) {
+    const tMesh = trackObject(new THREE.Mesh(trailGeo, trailMat));
+    tMesh.position.set(startX, ORBIT_Y, startZ);
+    trailMeshes.push(tMesh);
+  }
+  let trailCursor = 0;
+
+  // Puzzle state
+  let currentOrbitTargetSpeed = INITIAL_ORBIT_SPEED;
+  let relaysActivatedCount = 0;
+  let slingshotFired = false;
+  let gravityReleaseTimer = 0.0;
+  let ringSealBroken = false;
+  let targetRingPassed = false;
+
+  // Input tracking for human controls
+  const heldCodes = new Set<string>();
+
+  const breakRingSeal = (impactVelX: number) => {
+    if (ringSealBroken) return;
+    ringSealBroken = true;
+    for (let i = 0; i < sealStruts.length; i++) {
+      const strut = sealStruts[i];
+      if (strut.joint) {
+        world.removeImpulseJoint(strut.joint, true);
+        const idx = createdJoints.indexOf(strut.joint);
+        if (idx !== -1) createdJoints.splice(idx, 1);
+        strut.joint = null;
+      }
+      strut.body.setGravityScale(0.6, true);
+      const [dy, dz] = sealOffsets[i];
+      const mass = strut.body.mass();
+      strut.body.applyImpulse(
+        {
+          x: Math.max(impactVelX * 0.45, 5.0) * mass,
+          y: dy * 6.0 * mass,
+          z: dz * 6.0 * mass,
+        },
+        true,
+      );
+    }
+  };
+
+  const triggerSlingshotBurn = (strength = 1.0) => {
+    slingshotFired = true;
+    gravityReleaseTimer = 3.0;
+    const pos = probeBody.translation();
+    const vel = probeBody.linvel();
+    const mass = probeBody.mass();
+
+    // Compute vector toward the Target Ring aperture
+    const toRingX = RING_X - pos.x;
+    const toRingZ = RING_Z - pos.z;
+    const distToRing = Math.hypot(toRingX, toRingZ) || 1;
+    const dirX = toRingX / distToRing;
+    const dirZ = toRingZ / distToRing;
+
+    // Blend current prograde velocity with the escape tangent toward the Target Ring
+    const targetSpeed = Math.max(19.5 * strength, Math.hypot(vel.x, vel.z) + 5.5);
+    const desiredVx = dirX * targetSpeed;
+    const desiredVz = dirZ * targetSpeed;
+
+    probeBody.applyImpulse(
+      {
+        x: (desiredVx - vel.x) * mass,
+        y: (ORBIT_Y - pos.y) * 4.0 * mass,
+        z: (desiredVz - vel.z) * mass,
+      },
+      true,
+    );
+  };
+
+  const triggerTangentialBoost = () => {
+    const pos = probeBody.translation();
+    const vel = probeBody.linvel();
+    const mass = probeBody.mass();
+    const rx = pos.x - PLANET_X;
+    const rz = pos.z - PLANET_Z;
+    const r = Math.hypot(rx, rz) || 1;
+    // Counter-clockwise unit tangent
+    const tx = rz / r;
+    const tz = -rx / r;
+    const boost = 3.5;
+    currentOrbitTargetSpeed = Math.min(currentOrbitTargetSpeed + 2.2, 18.0);
+    probeBody.applyImpulse(
+      {
+        x: tx * boost * mass,
+        y: (0 - vel.y) * 0.5 * mass,
+        z: tz * boost * mass,
+      },
+      true,
+    );
+  };
+
+  const processCollisionEvents = () => {
+    eventQueue.drainCollisionEvents((h1, h2, started) => {
+      if (!started) return;
+      const involvesProbe = h1 === probeColliderHandle || h2 === probeColliderHandle;
+      if (!involvesProbe) return;
+      const otherHandle = h1 === probeColliderHandle ? h2 : h1;
+
+      // Check finite orbital relay gates
+      for (const gate of relayGates) {
+        if (!gate.activated && otherHandle === gate.sensorHandle) {
+          gate.activated = true;
+          relaysActivatedCount += 1;
+          currentOrbitTargetSpeed = Math.max(currentOrbitTargetSpeed, gate.boostSpeed);
+          gate.ringMat.color.setHex(0x10b981);
+          gate.ringMat.emissive.setHex(0x059669);
+          gate.ringMat.emissiveIntensity = 1.4;
+
+          // Apply finite single-payout prograde tangential impulse
+          const pos = probeBody.translation();
+          const mass = probeBody.mass();
+          const rx = pos.x - PLANET_X;
+          const rz = pos.z - PLANET_Z;
+          const r = Math.hypot(rx, rz) || 1;
+          const tx = rz / r;
+          const tz = -rx / r;
+          probeBody.applyImpulse({ x: tx * 2.2 * mass, y: 0, z: tz * 2.2 * mass }, true);
+        }
+      }
+
+      // Check target ring sensor
+      if (otherHandle === targetRingSensorHandle) {
+        targetRingPassed = true;
+        targetRingMat.color.setHex(0x10b981);
+        targetRingMat.emissive.setHex(0x059669);
+        const vel = probeBody.linvel();
+        breakRingSeal(Math.max(vel.x, 14.0));
+      }
+
+      // Check direct impact with any crystalline seal strut inside the target ring
+      for (const strut of sealStruts) {
+        if (otherHandle === strut.colliderHandle) {
+          targetRingPassed = true;
+          targetRingMat.color.setHex(0x10b981);
+          targetRingMat.emissive.setHex(0x059669);
+          const vel = probeBody.linvel();
+          breakRingSeal(Math.max(vel.x, 14.0));
+          // Preserve forward escape velocity through the shattered seal
+          if (vel.x < 14.0) {
+            probeBody.setLinvel({ x: 15.5, y: vel.y * 0.2, z: vel.z * 0.3 }, true);
+          }
+        }
+      }
+    });
+  };
+
+  const updateEnvironmentAndVisuals = (frameIndex: number, elapsedSeconds: number) => {
+    const dt = 1 / 60;
+    processCollisionEvents();
+
+    if (gravityReleaseTimer > 0) {
+      gravityReleaseTimer = Math.max(0, gravityReleaseTimer - dt);
+    }
+
+    const pos = probeBody.translation();
+    const vel = probeBody.linvel();
+    const mass = probeBody.mass();
+
+    // Keep probe stabilized on the y = ORBIT_Y horizontal orbital plane
+    const ay = (ORBIT_Y - pos.y) * 28.0 - vel.y * 8.0;
+    let ax = 0;
+    let az = 0;
+
+    const rx = pos.x - PLANET_X;
+    const rz = pos.z - PLANET_Z;
+    const r = Math.max(Math.hypot(rx, rz), 1.5);
+    const urx = rx / r;
+    const urz = rz / r;
+    // Counter-clockwise unit tangent
+    const utx = urz;
+    const utz = -urx;
+
+    if (pos.x > RING_X + 0.8 && Math.abs(pos.z - RING_Z) < 2.8) {
+      // Inside the Escape Capture Chamber behind the Target Ring
+      targetRingPassed = true;
+      if (!ringSealBroken) {
+        breakRingSeal(12.0);
+      }
+      probeBody.setLinearDamping(5.5);
+      ax = (GOAL_CENTER[0] - pos.x) * 10.0 - vel.x * 3.5;
+      az = (GOAL_CENTER[2] - pos.z) * 10.0 - vel.z * 3.5;
+    } else if (!slingshotFired && r < 10.5) {
+      // Active Central Gravity Well + Magnetic Orbital Track Guidance
+      const gravScale = gravityReleaseTimer > 0 ? 0.18 : 1.0;
+      const aGrav = (GM / (r * r)) * gravScale;
+      const radialVel = vel.x * urx + vel.z * urz;
+      const tangentialVel = vel.x * utx + vel.z * utz;
+
+      // Centripetal + radial confinement to keep orbit crisp at R = ORBIT_RADIUS
+      const aRadial = -aGrav - (r - ORBIT_RADIUS) * 22.0 - radialVel * 7.5;
+      const aTangential = (currentOrbitTargetSpeed - tangentialVel) * 4.5;
+
+      ax = urx * aRadial + utx * aTangential;
+      az = urz * aRadial + utz * aTangential;
+    } else {
+      // Hyperbolic Escape Trajectory toward Target Ring
+      const gravPull = (GM * 0.15) / (r * r);
+      ax = -urx * gravPull;
+      az = -urz * gravPull;
+
+      // Subtle magnetic corridor alignment toward the Target Ring aperture while approaching
+      if (pos.x < RING_X + 0.5 && vel.x > 2.0) {
+        const zError = RING_Z - pos.z;
+        az += zError * 14.0 - vel.z * 4.5;
+        if (vel.x < 15.0) {
+          ax += (17.5 - vel.x) * 5.0;
+        }
+      }
+    }
+
+    probeBody.applyImpulse(
+      {
+        x: ax * mass * dt,
+        y: ay * mass * dt,
+        z: az * mass * dt,
+      },
+      true,
+    );
+
+    // Sync dynamic visual meshes
+    const updatedPos = probeBody.translation();
+    const updatedRot = probeBody.rotation();
+    probeMesh.position.set(updatedPos.x, updatedPos.y, updatedPos.z);
+    probeMesh.quaternion.set(updatedRot.x, updatedRot.y, updatedRot.z, updatedRot.w);
+
+    for (const strut of sealStruts) {
+      const sp = strut.body.translation();
+      const sr = strut.body.rotation();
+      strut.mesh.position.set(sp.x, sp.y, sp.z);
+      strut.mesh.quaternion.set(sr.x, sr.y, sr.z, sr.w);
+    }
+
+    // Rotate massive sphere & rings
+    planetMesh.rotation.y = elapsedSeconds * 0.6;
+    planetRingMesh.rotation.z = elapsedSeconds * 0.9;
+
+    // Update breadcrumb trail
+    if (frameIndex % 2 === 0) {
+      const tMesh = trailMeshes[trailCursor % TRAIL_COUNT];
+      tMesh.position.set(updatedPos.x, updatedPos.y, updatedPos.z);
+      trailCursor += 1;
+    }
+  };
+
+  const checkGoalReached = (): boolean => {
+    const p = probeBody.translation();
+    return (
+      targetRingPassed &&
+      p.x >= 12.0 &&
+      p.x <= 16.5 &&
+      p.y >= 1.5 &&
+      p.y <= 5.5 &&
+      p.z >= 3.5 &&
+      p.z <= 9.0
+    );
+  };
+
+  const applyHumanInputs = () => {
+    const dt = 1 / 60;
+    const mass = probeBody.mass();
+    const thrustAccel = 24.0;
+    let fx = 0;
+    let fz = 0;
+
+    if (heldCodes.has('KeyW') || heldCodes.has('ArrowUp')) {
+      fz -= thrustAccel;
+    }
+    if (heldCodes.has('KeyS') || heldCodes.has('ArrowDown')) {
+      fz += thrustAccel;
+    }
+    if (heldCodes.has('KeyA') || heldCodes.has('ArrowLeft')) {
+      fx -= thrustAccel;
+    }
+    if (heldCodes.has('KeyD') || heldCodes.has('ArrowRight')) {
+      fx += thrustAccel;
+    }
+
+    if (fx !== 0 || fz !== 0) {
+      probeBody.applyImpulse({ x: fx * mass * dt, y: 0, z: fz * mass * dt }, true);
+    }
+
+    if (heldCodes.has('Space')) {
+      const pos = probeBody.translation();
+      // If in southern slingshot quadrant or all relays charged, launch along escape tangent
+      if (pos.z > PLANET_Z + 2.5 || relaysActivatedCount >= 3) {
+        triggerSlingshotBurn(1.0);
+      } else {
+        triggerTangentialBoost();
+      }
+    }
+
+    if (heldCodes.has('ShiftLeft')) {
+      triggerTangentialBoost();
+    }
+
+    if (heldCodes.has('KeyF')) {
+      gravityReleaseTimer = 2.5;
+      triggerSlingshotBurn(1.0);
+    }
+  };
+
+  const controls: ControlBinding[] = [
+    { key: 'KeyW', action: 'Thruster North (-Z)' },
+    { key: 'KeyS', action: 'Thruster South (+Z)' },
+    { key: 'KeyA', action: 'Thruster West (-X)' },
+    { key: 'KeyD', action: 'Thruster East (+X / Prograde Escape)' },
+    { key: 'ArrowUp', action: 'Thruster North (-Z)' },
+    { key: 'ArrowDown', action: 'Thruster South (+Z)' },
+    { key: 'ArrowLeft', action: 'Thruster West (-X)' },
+    { key: 'ArrowRight', action: 'Thruster East (+X / Prograde Escape)' },
+    { key: 'Space', action: 'Fire Slingshot Prograde Burn' },
+    { key: 'ShiftLeft', action: 'Pulse Orbital Tangential Boost' },
+    { key: 'KeyF', action: 'Release Gravity Well & Escape' },
+  ];
+
+  const goal: LevelGoal = {
+    type: 'in-region',
+    body: 'probe',
+    min: [12.0, 1.5, 3.5],
+    max: [16.5, 5.5, 9.0],
+  };
+
+  return {
+    controls,
+    goal,
+    onPointerOrKey: (event) => {
+      const code = event.code || event.key || '';
+      if (event.type === 'keydown') {
+        heldCodes.add(code);
+        if (code === 'Space') {
+          const pos = probeBody.translation();
+          if (pos.z > PLANET_Z + 2.0 || relaysActivatedCount >= 3) {
+            triggerSlingshotBurn(1.0);
+          } else {
+            triggerTangentialBoost();
+          }
+        } else if (code === 'ShiftLeft') {
+          triggerTangentialBoost();
+        } else if (code === 'KeyF') {
+          gravityReleaseTimer = 2.5;
+          triggerSlingshotBurn(1.0);
+        }
+      } else if (event.type === 'keyup') {
+        heldCodes.delete(code);
+      } else if (event.type === 'pointerdown' || event.type === 'click') {
+        triggerSlingshotBurn(1.0);
+      }
+    },
+    stepBotAndRules: (frameIndex: number, elapsedSeconds: number): StepResult => {
+      updateEnvironmentAndVisuals(frameIndex, elapsedSeconds);
+
+      const pos = probeBody.translation();
+      const vel = probeBody.linvel();
+
+      // Autonomous bot exercises orbital relay charging and fires the slingshot burn at the South perigee window
+      if (!slingshotFired) {
+        const inSouthSlingshotWindow =
+          relaysActivatedCount >= 3 &&
+          pos.z > PLANET_Z + 4.8 &&
+          pos.x >= PLANET_X - 2.2 &&
+          pos.x <= PLANET_X + 2.5 &&
+          vel.x > 4.0;
+
+        const fallbackWindow = elapsedSeconds > 3.6 && pos.z > PLANET_Z + 3.5 && vel.x > 2.0;
+
+        if (inSouthSlingshotWindow || fallbackWindow) {
+          triggerTangentialBoost();
+          triggerSlingshotBurn(1.05);
+        }
+      }
+
+      const goalReached = checkGoalReached();
+      let botState = `orbiting-relays-${relaysActivatedCount}/3`;
+      if (goalReached) {
+        botState = 'escaped-in-target-ring-chamber';
+      } else if (targetRingPassed) {
+        botState = 'entered-target-ring';
+      } else if (slingshotFired) {
+        botState = 'slingshot-escape-burn';
+      }
+
+      return {
+        botState,
+        goalReached,
+      };
+    },
+    stepHumanAndRules: (frameIndex: number, elapsedSeconds: number): StepResult => {
+      applyHumanInputs();
+      updateEnvironmentAndVisuals(frameIndex, elapsedSeconds);
+
+      const goalReached = checkGoalReached();
+      let botState = `human-orbit-relays-${relaysActivatedCount}/3`;
+      if (goalReached) {
+        botState = 'human-escaped-in-target-ring-chamber';
+      } else if (targetRingPassed) {
+        botState = 'human-entered-target-ring';
+      } else if (slingshotFired) {
+        botState = 'human-slingshot-burn';
+      }
+
+      return {
+        botState,
+        goalReached,
+      };
+    },
+    dispose: () => {
+      heldCodes.clear();
+      for (const obj of createdObjects) {
+        scene.remove(obj);
+      }
+      for (const geo of createdGeometries) {
+        geo.dispose();
+      }
+      for (const mat of createdMaterials) {
+        mat.dispose();
+      }
+      for (const joint of createdJoints) {
+        world.removeImpulseJoint(joint, true);
+      }
+      for (const body of createdBodies) {
+        world.removeRigidBody(body);
+      }
+      for (const name of registeredNames) {
+        namedBodies.delete(name);
+      }
+    },
+  };
+}
