@@ -9,14 +9,40 @@ import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
 import type { GeneratedFile } from './generatedFiles.ts'
 
 const model = process.env.ARGON_MODEL ?? 'gemini-4-argon'
+const critiqueModel = process.env.ARGON_CRITIQUE_MODEL ?? 'gemini-3.8-flash'
 const managedAgent = process.env.ARGON_AGENT ?? 'antigravity-preview-09-2026'
 const pollIntervalMs = 2_000
+
+export interface CritiqueTextMessage {
+  type: 'critique-text'
+  iteration: number
+  text: string
+  final: boolean
+  timestamp: string
+}
+
+export function createCritiqueTextMessage(
+  iteration: number,
+  text: string,
+  final: boolean,
+): CritiqueTextMessage {
+  return {
+    type: 'critique-text',
+    iteration,
+    text,
+    final,
+    timestamp: new Date().toISOString(),
+  }
+}
 
 export interface OrchestratorEvent {
   phase: string
   message: string
   iteration?: number
   diagnosis?: string
+  critiqueText?: string
+  critiqueFinal?: boolean
+  critiqueMessage?: CritiqueTextMessage
   skillContent?: string
   terminal?: string
   durationMs?: number
@@ -289,6 +315,19 @@ export class ArgonOrchestrator {
     this.ai = new GoogleGenAI({ apiKey })
   }
 
+  private emitCritiqueText(iteration: number, text: string, final: boolean) {
+    const critiqueMessage = createCritiqueTextMessage(iteration, text, final)
+    this.emit({
+      phase: 'critiquing',
+      message: final ? 'Playtest critique complete.' : 'Streaming playtest critique…',
+      iteration,
+      diagnosis: final ? text : undefined,
+      critiqueText: text,
+      critiqueFinal: final,
+      critiqueMessage,
+    })
+  }
+
   async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
     const startedAt = performance.now()
     const timings: Record<string, number> = {}
@@ -314,6 +353,87 @@ export class ArgonOrchestrator {
     return { ...result, timings }
   }
 
+  private async streamFastCritique(
+    activeVideo: UploadedFileHandle,
+    compactTelemetry: ShrunkTelemetry,
+    input: FailedRunInput,
+  ): Promise<string> {
+    const critiquePrompt = [
+      'Inspect the attached browser playtest video and the compacted frame telemetry.',
+      'Write a concise, plain-text physics diagnosis explaining why the playtest failed, citing video timestamps and key contact/fall telemetry events, and list the specific physical parameter changes needed.',
+      'Do not output code or JSON in this critique step.',
+      `Iteration: ${input.iteration}`,
+      `Failure: ${input.metadata.failureReason ?? 'Goal not reached'}`,
+      `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
+      JSON.stringify(compactTelemetry),
+    ].join('\n')
+
+    const response = await this.ai.interactions.create({
+      model: critiqueModel,
+      stream: true,
+      input: [
+        { type: 'video', uri: activeVideo.uri, mime_type: activeVideo.mimeType ?? 'video/webm' },
+        { type: 'text', text: critiquePrompt },
+      ],
+      generation_config: {
+        max_output_tokens: 2_048,
+        thinking_level: 'low',
+      },
+    })
+
+    let accumulated = ''
+    if (response && typeof (response as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function') {
+      for await (const chunk of response as AsyncIterable<{
+        event_type?: string
+        delta?: { content?: Array<{ type?: string; text?: string }> }
+        interaction?: { id?: string; output_text?: string | null }
+      }>) {
+        if (chunk.interaction?.id) {
+          interactionKinds.set(chunk.interaction.id, 'model')
+        }
+        if (chunk.event_type === 'step.delta') {
+          for (const part of chunk.delta?.content ?? []) {
+            if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+              accumulated += part.text
+              this.emitCritiqueText(input.iteration, accumulated, false)
+            }
+          }
+        } else if (chunk.event_type === 'interaction.complete' && !accumulated && chunk.interaction?.output_text) {
+          accumulated = chunk.interaction.output_text
+        }
+      }
+    } else if (response && typeof response === 'object' && 'id' in response) {
+      const nonStream = response as { id: string; status?: string; output_text?: string | null }
+      interactionKinds.set(nonStream.id, 'model')
+      const completed =
+        nonStream.status === 'completed'
+          ? nonStream
+          : await this.waitForInteraction(nonStream.id, 'Playtest critique')
+      accumulated = extractInteractionText(completed)
+    }
+
+    const finalCritique = accumulated.trim() || `Failure at iteration ${input.iteration}: ${input.metadata.failureReason ?? 'Goal not reached'}`
+    this.emitCritiqueText(input.iteration, finalCritique, true)
+    return finalCritique
+  }
+
+  async runManagedAgentCritique(
+    prompt: string,
+    previousInteractionId?: string,
+  ): Promise<{ id: string; text: string }> {
+    const chainedAgentId = resolveChainedInteractionId(previousInteractionId, 'agent')
+    const interaction = await this.ai.interactions.create({
+      agent: managedAgent,
+      environment: 'remote',
+      ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
+      input: prompt,
+      background: true,
+    })
+    interactionKinds.set(interaction.id, 'agent')
+    const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique')
+    return { id: interaction.id, text: extractInteractionText(completed) }
+  }
+
   async critiqueAndPatchWorld(
     input: FailedRunInput,
     validate: (files: GeneratedFile[]) => Promise<string[]>,
@@ -323,51 +443,77 @@ export class ArgonOrchestrator {
     const videoPath = join(tmpdir(), `argon-${randomUUID()}.webm`)
     await writeFile(videoPath, input.videoBytes)
     try {
-      this.emit({ phase: 'critiquing', message: 'Uploading the failed run for managed-agent critique…', iteration: input.iteration })
+      this.emit({ phase: 'critiquing', message: 'Uploading the failed run for playtest critique…', iteration: input.iteration })
       const uploadStart = performance.now()
-      const uploadedVideo = await this.ai.files.upload({
-        file: videoPath,
-        config: { mimeType: 'video/webm' },
-      })
+      const uploadedVideo = await this.ai.interactions
+        ? await this.ai.files.upload({
+            file: videoPath,
+            config: { mimeType: 'video/webm' },
+          })
+        : ({ state: 'FAILED' } as UploadedFileHandle)
       const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
       timings.uploadMs = Math.round(performance.now() - uploadStart)
 
       const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
-      const prompt = `Inspect the attached browser playtest video and the compacted frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return only the files in src/generated/ that changed and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):\n${JSON.stringify(compactTelemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
 
       const critiqueStart = performance.now()
-      const chainedAgentId = resolveChainedInteractionId(input.previousInteractionId, 'agent')
-      const interaction = await this.ai.interactions.create({
-        agent: managedAgent,
-        environment: 'remote',
-        ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
-        input: [
-          { type: 'video', uri: activeVideo.uri, mime_type: activeVideo.mimeType ?? 'video/webm' },
-          { type: 'text', text: prompt },
-        ],
-        background: true,
-      })
-      interactionKinds.set(interaction.id, 'agent')
-      const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique')
+      const critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
       timings.critiqueMs = Math.round(performance.now() - critiqueStart)
 
+      this.emit({
+        phase: 'patching',
+        message: 'Synthesizing physics patch from streamed critique…',
+        iteration: input.iteration,
+        diagnosis: critiqueText,
+      })
+      const patchPrompt = [
+        'Apply the playtest critique below to fix the physics level.',
+        'Return only the files in src/generated/ that changed and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.',
+        `Iteration: ${input.iteration}`,
+        `Failure: ${input.metadata.failureReason ?? 'Goal not reached'}`,
+        `Streamed critique:\n${critiqueText}`,
+        `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
+        JSON.stringify(compactTelemetry),
+        `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
+        levelContract,
+      ].join('\n\n')
+
+      const patchStart = performance.now()
+      const chainedModelId = resolveChainedInteractionId(input.previousInteractionId, 'model')
+      const patchInteraction = await this.ai.interactions.create({
+        model,
+        background: true,
+        ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
+        input: patchPrompt,
+        generation_config: {
+          max_output_tokens: 65_536,
+          thinking_level: 'low',
+        },
+        system_instruction: 'You patch Three.js and Rapier level modules for the Argon engine. Return only the files in src/generated/ that changed.',
+      })
+      interactionKinds.set(patchInteraction.id, 'model')
+      const completedPatch = await this.waitForInteraction(patchInteraction.id, 'Physics level patch')
+      timings.patchMs = Math.round(performance.now() - patchStart)
+
       const patched = await this.parseAndRepair(
-        extractInteractionText(completed),
-        interaction.id,
+        extractInteractionText(completedPatch),
+        patchInteraction.id,
         validate,
-        prompt,
+        patchPrompt,
         input.currentFiles,
         timings,
       )
+      const diagnosis = patched.diagnosis ?? critiqueText
       timings.totalMs = Math.round(performance.now() - startedAt)
       this.emit({
         phase: 'patched',
-        message: `Critique and patch completed in ${timings.totalMs}ms (upload ${timings.uploadMs}ms, critique ${timings.critiqueMs}ms).`,
+        message: `Critique and patch completed in ${timings.totalMs}ms (upload ${timings.uploadMs}ms, critique ${timings.critiqueMs}ms, patch ${timings.patchMs}ms).`,
         iteration: input.iteration,
+        diagnosis,
         durationMs: timings.totalMs,
         timings,
       })
-      return { ...patched, timings }
+      return { ...patched, diagnosis, timings }
     } finally {
       await rm(videoPath, { force: true })
     }
