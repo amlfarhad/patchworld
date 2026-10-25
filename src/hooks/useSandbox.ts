@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ControlBinding, LevelGoal } from '../engine/types'
 
 export interface AgentLog { id: number; timestamp: string; message: string; kind: 'activity' | 'terminal' | 'error' }
 /** The agent's critique of the latest failed attempt. `streaming` text grows as `critique-text` updates arrive. */
@@ -7,6 +8,7 @@ export interface Critique { iteration: number; text: string; status: 'idle' | 'w
 export interface FileChange { path: string; before: string | null; after: string }
 /** The files one patch wrote, for the Workshop's Code tab. */
 export interface CodeIteration { iteration: number; timestamp: string; changes: FileChange[] }
+export interface HumanResult { outcome: 'won' | 'lost'; reason?: string; seconds?: number }
 export interface Replay { runId: string; videoUrl: string; failed: boolean; failureReason?: string; iteration: number; frameCount: number }
 export interface SandboxState {
   connected: boolean; ready: boolean; hasLevel: boolean; phase: string; message: string;
@@ -14,6 +16,8 @@ export interface SandboxState {
   diagnosis: string; diagnosisTime: string; critique: Critique; code: CodeIteration[]; replay: Replay | null; logs: AgentLog[];
   /** Every attempt at the current goal, oldest first (the last is `replay`), and each failed attempt's critique by iteration. */
   replays: Replay[]; critiques: Record<number, string>;
+  /** The mounted level's declared controls and goal, how many times a level has mounted, and how a person's play ended. */
+  controls: ControlBinding[]; levelGoal: LevelGoal | null; levelMounts: number; humanResult: HumanResult | null;
   skillContent: string; skillUpdated: string; goal: string; error: string; human: boolean;
 }
 type ProgressDetail = { phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
@@ -21,7 +25,7 @@ const idleCritique: Critique = { iteration: 0, text: '', status: 'idle', updated
 const initial: SandboxState = {
   connected: false, ready: false, hasLevel: false, phase: 'idle', message: 'Ready for your first world',
   frame: 0, frameLimit: 240, bodyCount: 0, iteration: 0, diagnosis: '', diagnosisTime: '',
-  critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false,
+  critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, controls: [], levelGoal: null, levelMounts: 0, humanResult: null, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false,
 }
 
 // Daemons that only send the final `diagnosis` still drive the critique: `critiquing` means the agent is watching the replay.
@@ -54,7 +58,13 @@ export function useSandbox() {
       window.addEventListener(name, listener); bindings.push([name, listener])
     }
     listen<boolean>('argon:connection', (connected) => setState((s) => ({ ...s, connected, logs: log(s, connected ? 'Local sync connection established.' : 'Sync disconnected. Reconnecting…') })))
-    listen<{ hasLevel: boolean; bodyCount: number }>('argon:level-mounted', (detail) => setState((s) => ({ ...s, ...detail, ready: true, ...(detail.hasLevel ? {} : { human: false, phase: 'idle', frame: 0 }) })))
+    listen<{ hasLevel: boolean; bodyCount: number; controls?: ControlBinding[]; goal?: LevelGoal }>('argon:level-mounted', ({ hasLevel, bodyCount, controls, goal }) => setState((s) => ({
+      ...s, hasLevel, bodyCount, ready: true, controls: controls ?? [], levelGoal: goal ?? null, levelMounts: s.levelMounts + 1, humanResult: null,
+      ...(hasLevel ? {} : { human: false, phase: 'idle', frame: 0 }),
+    })))
+    // A person playing the level reached its goal, or the level reported that their attempt failed.
+    listen<{ seconds?: number } | boolean | undefined>('argon:human-won', (d) => setState((s) => (s.human && !s.humanResult ? { ...s, humanResult: { outcome: 'won', seconds: typeof d === 'object' ? d.seconds : undefined } } : s)))
+    listen<{ reason?: string } | undefined>('argon:human-lost', (d) => setState((s) => (s.human && !s.humanResult ? { ...s, humanResult: { outcome: 'lost', reason: d?.reason } } : s)))
     listen<{ frame: number; total: number; bodyCount: number }>('argon:frame', (d) => setState((s) => ({ ...s, phase: 'running', frame: d.frame, frameLimit: d.total, bodyCount: d.bodyCount })))
     listen<ProgressDetail>('argon:progress', (d) => {
       setState((s) => { const critique = critiqueFromProgress(s.critique, d, s.iteration); return {
