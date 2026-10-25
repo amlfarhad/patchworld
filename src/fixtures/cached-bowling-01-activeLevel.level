@@ -1,0 +1,111 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import type { ControlBinding, LevelGoal, MountedLevel, StepResult } from '../engine/types';
+import { buildScene } from './scene';
+import { buildMechanics } from './mechanics';
+
+const controls: ControlBinding[] = [
+  {
+    key: 'Space',
+    action: 'Launch / boost the bowling ball rapidly down the lane (+X)',
+  },
+  {
+    key: 'KeyD',
+    action: 'Roll forward down the lane (+X)',
+  },
+  {
+    key: 'ArrowRight',
+    action: 'Roll forward down the lane (+X)',
+  },
+  {
+    key: 'KeyA',
+    action: 'Steer ball left (-Z)',
+  },
+  {
+    key: 'ArrowLeft',
+    action: 'Steer ball left (-Z)',
+  },
+  {
+    key: 'KeyW',
+    action: 'Steer ball left (-Z)',
+  },
+  {
+    key: 'KeyS',
+    action: 'Steer ball right (+Z)',
+  },
+];
+
+const goal: LevelGoal = {
+  type: 'in-region',
+  body: 'bowlingBall',
+  min: [9.2, -2, -2.5],
+  max: [13.8, 3, 2.5],
+};
+
+function isGoalReached(namedBodies: Map<string, RAPIER.RigidBody>): boolean {
+  const body = namedBodies.get(goal.body);
+  if (!body) return false;
+  const pos = body.translation();
+  if (goal.type === 'in-region') {
+    return (
+      pos.x >= goal.min[0] &&
+      pos.x <= goal.max[0] &&
+      pos.y >= goal.min[1] &&
+      pos.y <= goal.max[1] &&
+      pos.z >= goal.min[2] &&
+      pos.z <= goal.max[2]
+    );
+  }
+  return false;
+}
+
+export function buildWorld(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+  eventQueue: RAPIER.EventQueue,
+): MountedLevel {
+  const sceneHandle = buildScene(scene, world, namedBodies);
+  const mechanics = buildMechanics(scene, world, namedBodies, eventQueue);
+
+  let goalLatched = false;
+
+  const evaluateGoal = (): boolean => {
+    if (goalLatched) return true;
+    if (isGoalReached(namedBodies)) {
+      goalLatched = true;
+      return true;
+    }
+    return false;
+  };
+
+  return {
+    controls,
+    goal,
+    onPointerOrKey: (event) => {
+      mechanics.onPointerOrKey(event);
+    },
+    stepBotAndRules: (frameIndex: number, elapsedSeconds: number): StepResult => {
+      const { botState, failedEarly } = mechanics.stepBot(frameIndex, elapsedSeconds);
+      const goalReached = evaluateGoal();
+      return {
+        botState,
+        goalReached,
+        failedEarly,
+      };
+    },
+    stepHumanAndRules: (frameIndex: number, elapsedSeconds: number): StepResult => {
+      const { botState, failedEarly } = mechanics.stepHuman(frameIndex, elapsedSeconds);
+      const goalReached = evaluateGoal();
+      return {
+        botState,
+        goalReached,
+        failedEarly,
+      };
+    },
+    dispose: () => {
+      mechanics.dispose();
+      sceneHandle.dispose();
+    },
+  };
+}

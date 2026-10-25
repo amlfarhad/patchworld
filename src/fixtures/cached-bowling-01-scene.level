@@ -1,0 +1,265 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import {
+  createBodyWithCollider,
+  createPlatformTile,
+  createGoalFlag,
+  createCrate,
+  createTree,
+  createRock,
+  scatter,
+} from '../engine/assetKit';
+
+export interface SceneHandle {
+  dispose: () => void;
+}
+
+export function buildScene(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+): SceneHandle {
+  const root = new THREE.Group();
+  root.name = 'BowlingSceneRoot';
+  scene.add(root);
+
+  const createdBodies: RAPIER.RigidBody[] = [];
+
+  // 1. Named body: laneFloor [1, -0.25, 0], size [26, 0.5, 4]
+  const laneFloorBody = createBodyWithCollider(world, {
+    type: 'fixed',
+    shape: 'box',
+    position: [1, -0.25, 0],
+    size: [26, 0.5, 4],
+    friction: 0.02,
+    restitution: 0.1,
+  });
+  namedBodies.set('laneFloor', laneFloorBody);
+  createdBodies.push(laneFloorBody);
+
+  const laneMesh = createPlatformTile({
+    position: [1, -0.24, 0],
+    size: [26, 0.5, 4],
+    color: 0xb87333,
+    topColor: 0xe6b87d,
+  });
+  root.add(laneMesh);
+
+  // Decorative wooden lane plank stripes along X
+  const stripeMatLight = new THREE.MeshStandardMaterial({ color: 0xf0c993, roughness: 0.2, metalness: 0.05 });
+  const stripeMatDark = new THREE.MeshStandardMaterial({ color: 0xd9a264, roughness: 0.25, metalness: 0.05 });
+  for (let i = -9; i <= 9; i++) {
+    const zPos = i * 0.2;
+    const stripeGeo = new THREE.BoxGeometry(25.8, 0.015, 0.18);
+    const stripe = new THREE.Mesh(stripeGeo, i % 2 === 0 ? stripeMatLight : stripeMatDark);
+    stripe.position.set(1, 0.01, zPos);
+    stripe.receiveShadow = true;
+    root.add(stripe);
+  }
+
+  // Foul line at x = -7.5
+  const foulLineGeo = new THREE.BoxGeometry(0.12, 0.02, 3.96);
+  const foulLineMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4 });
+  const foulLine = new THREE.Mesh(foulLineGeo, foulLineMat);
+  foulLine.position.set(-7.5, 0.015, 0);
+  root.add(foulLine);
+
+  // Aiming arrows on the lane around x = -2 to x = 0
+  const arrowMat = new THREE.MeshStandardMaterial({ color: 0x8b1e1e, roughness: 0.3 });
+  const arrowOffsets: [number, number][] = [
+    [0, 0],
+    [-0.5, -0.6],
+    [-0.5, 0.6],
+    [-1.0, -1.2],
+    [-1.0, 1.2],
+  ];
+  for (const [dx, dz] of arrowOffsets) {
+    const coneGeo = new THREE.ConeGeometry(0.14, 0.5, 3);
+    coneGeo.rotateZ(-Math.PI / 2);
+    coneGeo.scale(1, 0.12, 1);
+    const arrow = new THREE.Mesh(coneGeo, arrowMat);
+    arrow.position.set(-1.5 + dx, 0.02, dz);
+    root.add(arrow);
+  }
+
+  // Pin deck spot markers matching the 10-pin rack coordinates
+  const pinSpots: [number, number][] = [
+    [7, 0],
+    [7.9, -0.5],
+    [7.9, 0.5],
+    [8.8, -1.0],
+    [8.8, 0],
+    [8.8, 1.0],
+    [9.7, -1.5],
+    [9.7, -0.5],
+    [9.7, 0.5],
+    [9.7, 1.5],
+  ];
+  const spotMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.4 });
+  const spotGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.02, 16);
+  for (const [px, pz] of pinSpots) {
+    const spot = new THREE.Mesh(spotGeo, spotMat);
+    spot.position.set(px, 0.015, pz);
+    root.add(spot);
+  }
+
+  // Recessed pin pit carpet visual at the back end (x = 11 to 13.6)
+  const pitMat = new THREE.MeshStandardMaterial({ color: 0x1e242b, roughness: 0.8 });
+  const pitMesh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.02, 3.96), pitMat);
+  pitMesh.position.set(12.3, 0.015, 0);
+  root.add(pitMesh);
+
+  // 2. Named body: leftRail [1, 0.25, -2.15], size [26, 0.5, 0.3]
+  const leftRailBody = createBodyWithCollider(world, {
+    type: 'fixed',
+    shape: 'box',
+    position: [1, 0.25, -2.15],
+    size: [26, 0.5, 0.3],
+    friction: 0.02,
+    restitution: 0.3,
+  });
+  namedBodies.set('leftRail', leftRailBody);
+  createdBodies.push(leftRailBody);
+
+  const leftRailMesh = createPlatformTile({
+    position: [1, 0.25, -2.15],
+    size: [26, 0.5, 0.3],
+    color: 0x2c3e50,
+    topColor: 0xe74c3c,
+  });
+  root.add(leftRailMesh);
+
+  // 3. Named body: rightRail [1, 0.25, 2.15], size [26, 0.5, 0.3]
+  const rightRailBody = createBodyWithCollider(world, {
+    type: 'fixed',
+    shape: 'box',
+    position: [1, 0.25, 2.15],
+    size: [26, 0.5, 0.3],
+    friction: 0.02,
+    restitution: 0.3,
+  });
+  namedBodies.set('rightRail', rightRailBody);
+  createdBodies.push(rightRailBody);
+
+  const rightRailMesh = createPlatformTile({
+    position: [1, 0.25, 2.15],
+    size: [26, 0.5, 0.3],
+    color: 0x2c3e50,
+    topColor: 0xe74c3c,
+  });
+  root.add(rightRailMesh);
+
+  // 4. Named body: backstop [13.8, 1.5, 0], size [0.5, 3, 4.6]
+  const backstopBody = createBodyWithCollider(world, {
+    type: 'fixed',
+    shape: 'box',
+    position: [13.8, 1.5, 0],
+    size: [0.5, 3, 4.6],
+    friction: 0.5,
+    restitution: 0.1,
+  });
+  namedBodies.set('backstop', backstopBody);
+  createdBodies.push(backstopBody);
+
+  const backstopMesh = createPlatformTile({
+    position: [13.8, 1.5, 0],
+    size: [0.5, 3, 4.6],
+    color: 0x1b2631,
+    topColor: 0xf1c40f,
+  });
+  root.add(backstopMesh);
+
+  // Overhead Pinsetter / Scoreboard Arch above the pin deck
+  const archLeftPost = createPlatformTile({
+    position: [10.5, 2.2, -2.5],
+    size: [0.6, 4.4, 0.6],
+    color: 0x2c3e50,
+    topColor: 0x34495e,
+  });
+  const archRightPost = createPlatformTile({
+    position: [10.5, 2.2, 2.5],
+    size: [0.6, 4.4, 0.6],
+    color: 0x2c3e50,
+    topColor: 0x34495e,
+  });
+  const archHeader = createPlatformTile({
+    position: [10.5, 4.1, 0],
+    size: [0.8, 1.0, 5.6],
+    color: 0xc0392b,
+    topColor: 0xf39c12,
+  });
+  root.add(archLeftPost, archRightPost, archHeader);
+
+  // Goal flag at x = 11 behind the pin rack
+  const goalFlagLeft = createGoalFlag({
+    position: [11, 0, -1.75],
+    scale: 1.1,
+    color: 0x2ecc71,
+  });
+  const goalFlagRight = createGoalFlag({
+    position: [11, 0, 1.75],
+    scale: 1.1,
+    color: 0x2ecc71,
+  });
+  root.add(goalFlagLeft, goalFlagRight);
+
+  // Decorative crates and bowling ball return rack props along the outer sides of the lane
+  for (const xPos of [-9, -4, 2, 8]) {
+    const crateLeft = createCrate({ position: [xPos, 0.4, -3.2], scale: 0.8 });
+    const crateRight = createCrate({ position: [xPos, 0.4, 3.2], scale: 0.8 });
+    root.add(crateLeft, crateRight);
+  }
+
+  // Background trees and rocks outside the bowling lane
+  const treeTemplate = createTree({ scale: 1.1 });
+  const rockTemplate = createRock({ scale: 0.9 });
+  scatter(root as unknown as THREE.Scene, treeTemplate, 14, {
+    min: [-18, -14],
+    max: [20, -4.5],
+    y: 0,
+    minRadius: 2.5,
+  }, 101);
+  scatter(root as unknown as THREE.Scene, treeTemplate, 14, {
+    min: [-18, 4.5],
+    max: [20, 14],
+    y: 0,
+    minRadius: 2.5,
+  }, 202);
+  scatter(root as unknown as THREE.Scene, rockTemplate, 10, {
+    min: [-16, -12],
+    max: [18, -4.0],
+    y: 0,
+    minRadius: 2.0,
+  }, 303);
+  scatter(root as unknown as THREE.Scene, rockTemplate, 10, {
+    min: [-16, 4.0],
+    max: [18, 12],
+    y: 0,
+    minRadius: 2.0,
+  }, 404);
+
+  return {
+    dispose: () => {
+      scene.remove(root);
+      root.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry?.dispose();
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach((m) => m.dispose());
+          } else {
+            obj.material?.dispose();
+          }
+        }
+      });
+      for (const body of createdBodies) {
+        if (world.bodies.contains(body.handle)) {
+          world.removeRigidBody(body);
+        }
+      }
+      namedBodies.delete('laneFloor');
+      namedBodies.delete('leftRail');
+      namedBodies.delete('rightRail');
+      namedBodies.delete('backstop');
+    },
+  };
+}
