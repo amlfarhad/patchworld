@@ -137,7 +137,8 @@ async function describeChanges(files: GeneratedFile[]): Promise<FileChange[]> {
 }
 
 /** Typechecks and writes a batch. Returns the written files, or null when rejected or superseded. */
-async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = goalEpoch): Promise<GeneratedFile[] | null> {
+/** `attempt` is the attempt this patch starts, as the hosted loop numbers it, so the UI can match patches to attempts. */
+async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = goalEpoch, attempt = iteration + 1): Promise<GeneratedFile[] | null> {
   const safeFiles = validateGeneratedFiles(files)
   const diagnostics = batchSignature(safeFiles) === lastCleanBatch ? [] : await checkGeneratedTypeScript(safeFiles, projectRoot)
   if (diagnostics.length > 0) {
@@ -152,7 +153,7 @@ async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = 
   await writeBatch(safeFiles)
   const paths = safeFiles.map(({ path }) => path)
   sendToRole('agent', { type: 'patch-applied', runId, files: paths })
-  sendToRole('browser', { type: 'patch-applied', runId, files: paths, iteration, changes })
+  sendToRole('browser', { type: 'patch-applied', runId, files: paths, iteration: attempt, changes })
   return safeFiles
 }
 
