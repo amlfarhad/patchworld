@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import RAPIER from '@dimforge/rapier3d-compat'
 import { AutonomousLoop } from './AutonomousLoop'
 import type { ContactSnapshot, GeneratedLevelModule, MountedLevel, StepResult } from './types'
@@ -9,6 +10,7 @@ export class EngineHost {
   readonly scene = new THREE.Scene()
   readonly camera = new THREE.PerspectiveCamera(45, 1, 0.1, 500)
   readonly renderer: THREE.WebGLRenderer
+  readonly controls: OrbitControls
   readonly namedBodies = new Map<string, RAPIER.RigidBody>()
   readonly autonomousLoop: AutonomousLoop
 
@@ -18,6 +20,7 @@ export class EngineHost {
   private world: RAPIER.World | null = null
   private levelHandle: MountedLevel | null = null
   private levelRoot: THREE.Group | null = null
+  private unsubscribeLoopState: (() => void) | null = null
   private animationFrame = 0
   private frameIndex = 0
   private accumulator = 0
@@ -35,6 +38,15 @@ export class EngineHost {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
     this.camera.position.set(0, 3, 8)
+    this.controls = new OrbitControls(this.camera, canvas)
+    this.controls.enableDamping = true
+    this.controls.dampingFactor = 0.08
+    this.controls.target.set(0, 0, 0)
+    this.controls.enabled = this.autonomousLoop.isHumanControlled
+    this.controls.update()
+    this.unsubscribeLoopState = this.autonomousLoop.onStateChange(() => {
+      this.controls.enabled = this.autonomousLoop.isHumanControlled
+    })
     this.scene.add(new THREE.HemisphereLight(0xdceeff, 0x27313a, 2))
     this.resize()
     window.addEventListener('resize', this.resize)
@@ -103,6 +115,7 @@ export class EngineHost {
     this.frameIndex = 0
     this.accumulator = 0
     this.currentModule = levelModule
+    this.frameLevelBounds()
     window.dispatchEvent(
       new CustomEvent('argon:level-mounted', {
         detail: {
@@ -135,10 +148,51 @@ export class EngineHost {
     this.disposed = true
     window.cancelAnimationFrame(this.animationFrame)
     window.removeEventListener('resize', this.resize)
+    this.unsubscribeLoopState?.()
+    this.unsubscribeLoopState = null
+    this.controls.dispose()
     this.clearCurrentLevel()
     this.autonomousLoop.dispose()
     this.eventQueue?.free()
     this.renderer.dispose()
+  }
+
+  private frameLevelBounds(): void {
+    const box = new THREE.Box3()
+    if (this.levelRoot && this.levelRoot.children.length > 0) {
+      this.levelRoot.updateMatrixWorld(true)
+      box.expandByObject(this.levelRoot)
+    }
+
+    this.namedBodies.forEach((body) => {
+      const pos = body.translation()
+      const point = new THREE.Vector3(pos.x, pos.y, pos.z)
+      box.expandByPoint(point.clone().addScalar(0.5))
+      box.expandByPoint(point.clone().subScalar(0.5))
+    })
+
+    if (box.isEmpty()) {
+      this.camera.position.set(0, 3, 8)
+      this.controls.target.set(0, 0, 0)
+      this.camera.lookAt(0, 0, 0)
+      this.controls.update()
+      return
+    }
+
+    const sphere = new THREE.Sphere()
+    box.getBoundingSphere(sphere)
+    const center = sphere.center
+    const radius = Math.max(sphere.radius, 2.5)
+    const vFov = THREE.MathUtils.degToRad(this.camera.fov)
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(this.camera.aspect, 0.5))
+    const halfFov = Math.min(vFov, hFov) / 2
+    const distance = Math.min(Math.max((radius / Math.sin(halfFov)) * 1.15, 6), 180)
+    const viewDirection = new THREE.Vector3(0.35, 0.55, 1).normalize()
+
+    this.camera.position.copy(center).addScaledVector(viewDirection, distance)
+    this.controls.target.copy(center)
+    this.camera.lookAt(center)
+    this.controls.update()
   }
 
   private readonly resize = (): void => {
@@ -181,6 +235,9 @@ export class EngineHost {
       )
     }
 
+    if (this.controls.enabled) {
+      this.controls.update()
+    }
     this.renderer.render(this.scene, this.camera)
     this.animationFrame = window.requestAnimationFrame(this.tick)
   }
