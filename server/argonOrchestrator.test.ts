@@ -543,10 +543,16 @@ test('planner and builder prompts reference ../engine/assetKit models and helper
   }
   const planPrompt = buildWorldPlanPrompt('Mario parkour', '', { useAssetKit: true })
   const scenePrompt = buildModuleBuilderPrompt('src/generated/scene.ts', 'Mario parkour', spec, '', { useAssetKit: true })
+  const mechanicsPrompt = buildModuleBuilderPrompt('src/generated/mechanics.ts', 'Mario parkour', spec, '', { useAssetKit: true })
   assert.ok(planPrompt.includes('../engine/assetKit'))
-  assert.ok(scenePrompt.includes('../engine/assetKit'))
-  assert.ok(scenePrompt.includes('createCharacter'))
-  assert.ok(scenePrompt.includes('createPlatformTile'))
+  assert.ok(scenePrompt.includes("Reusable 3D Asset & Gameplay Kit ('../engine/assetKit'):"))
+  assert.ok(scenePrompt.includes('createCharacter(opts?)'))
+  assert.ok(scenePrompt.includes('createPlatformTile('))
+  assert.ok(scenePrompt.includes('scatter(scene, templateGroup, count'))
+  assert.ok(mechanicsPrompt.includes('createBodyWithCollider(world'))
+  assert.ok(mechanicsPrompt.includes('createPlayerController(world, body'))
+  assert.ok(mechanicsPrompt.includes('collectOnce(mesh'))
+  assert.ok(mechanicsPrompt.includes('hitFromBelow(blockMesh'))
 })
 
 test('levelContract and generation prompt enforce KeyboardEvent.code controls, genre-agnostic contact/finite-spawn/reachability mechanics, and bot mechanic coverage', () => {

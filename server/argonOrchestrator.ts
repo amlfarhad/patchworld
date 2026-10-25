@@ -223,23 +223,20 @@ export type ReviseWorldInput = TwistInput | {
 }
 
 export const assetKitGuidance = `
-Reusable 3D models & gameplay helpers from '../engine/assetKit' (import models and helpers from '../engine/assetKit' instead of building everything from boxes):
-- 3D models (all return THREE.Group):
-  createCharacter(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createEnemy(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createTree(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createRock(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createCrate(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createCoin(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createItemBlock(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createGoalFlag(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number })
-  createPlatformTile(options?: { position?: [number, number, number]; scale?: number | [number, number, number]; color?: number; size?: [number, number, number]; topColor?: number })
-  scatter(scene: THREE.Scene, template: THREE.Object3D, count: number, area: { min: [number, number]; max: [number, number]; y?: number; minRadius?: number }, seed?: number): THREE.Group
-- Physics & gameplay helpers:
-  createBodyWithCollider(world: RAPIER.World, options?: { type?: 'dynamic' | 'fixed' | 'kinematicPosition'; shape?: 'box' | 'capsule' | 'ball'; position?: [number, number, number]; size?: [number, number, number]; halfHeight?: number; radius?: number; density?: number; friction?: number; restitution?: number; lockRotations?: boolean }): RAPIER.RigidBody
-  createPlayerController(world: RAPIER.World, body: RAPIER.RigidBody, options?: { moveSpeed?: number; jumpSpeed?: number; groundYThreshold?: number; leftKeys?: string[]; rightKeys?: string[]; jumpKeys?: string[] }): { heldKeys: Set<string>; onPointerOrKey: (event: { type: string; key?: string; code?: string }) => void; step: () => { grounded: boolean; moving: number }; syncMesh: (mesh: THREE.Object3D) => void }
-  collectOnce(targetMesh: THREE.Object3D, options?: { radius?: number; onCollect?: () => void }): { readonly triggered: boolean; check: (actor: RAPIER.RigidBody) => boolean; reset: () => void }
-  hitFromBelow(blockMesh: THREE.Object3D, options?: { width?: number; reachY?: number; once?: boolean; onHit?: () => void }): { readonly triggered: boolean; check: (actor: RAPIER.RigidBody) => boolean; reset: () => void }
+Reusable 3D Asset & Gameplay Kit ('../engine/assetKit'):
+Prefer importing ready-made models and helpers from '../engine/assetKit' instead of building raw box/sphere programmer art:
+- Models (return THREE.Group, take { position?: [x,y,z], scale?: number | [x,y,z], color?: number }):
+  createCharacter(opts?), createEnemy(opts?), createTree(opts?), createRock(opts?),
+  createCrate(opts?), createCoin(opts?), createItemBlock(opts?), createGoalFlag(opts?),
+  createPlatformTile({ position?, scale?, color?, topColor?, size?: [w,h,d] })
+- Background scenery instancing:
+  scatter(scene, templateGroup, count, { min: [minX, minZ], max: [maxX, maxZ], y?: number, minRadius?: number }, seed?)
+- Physics collider helper:
+  createBodyWithCollider(world, { type?: 'dynamic' | 'fixed' | 'kinematicPosition', shape?: 'box' | 'capsule' | 'ball', position?: [x,y,z], size?: [w,h,d], halfHeight?: number, radius?: number, density?: number, friction?: number, restitution?: number, lockRotations?: boolean })
+- Gameplay helpers:
+  - createPlayerController(world, body, { moveSpeed?, jumpSpeed?, leftKeys?, rightKeys?, jumpKeys? }) -> { heldKeys, onPointerOrKey(event), step(), syncMesh(mesh) }
+  - collectOnce(mesh, { radius?, onCollect? }) -> { triggered, check(actorBody), reset() }
+  - hitFromBelow(blockMesh, { width?, reachY?, once?, onHit? }) -> { triggered, check(actorBody), reset() }
 `
 
 export const levelContract = `
