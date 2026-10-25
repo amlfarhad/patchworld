@@ -102,9 +102,17 @@ export function useSandbox() {
         return { ...s, replay, replays: [...s.replays, replay].slice(-MAX_REPLAYS), critique: { ...idleCritique, iteration: s.critique.iteration } }
       })
     })
-    listen<string>('argon:goal-submitted', (goal) => {
-      videoUrls.splice(0).forEach((url) => URL.revokeObjectURL(url))
-      setState((s) => ({ ...s, goal, error: '', phase: 'synthesizing', human: false, diagnosis: '', diagnosisTime: '', critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, iteration: 0, frame: 0 }))
+    listen<string | { goal: string; twist: boolean }>('argon:goal-submitted', (detail) => {
+      // A twist keeps earlier attempts, code and critiques so they stay comparable; a new goal starts fresh.
+      const twist = typeof detail !== 'string' && detail.twist
+      const text = typeof detail === 'string' ? detail : detail.goal
+      if (!twist) videoUrls.splice(0).forEach((url) => URL.revokeObjectURL(url))
+      setState((s) => ({
+        ...s, error: '', phase: 'synthesizing', human: false, diagnosis: '', diagnosisTime: '', critique: idleCritique, frame: 0,
+        ...(twist
+          ? { goal: s.goal ? `${s.goal} (twist: ${text})` : text }
+          : { goal: text, code: [], replay: null, replays: [], critiques: {}, iteration: 0 }),
+      }))
     })
     listen<string>('argon:goal-error', (error) => setState((s) => ({ ...s, error, phase: 'error', logs: log(s, error, 'error') })))
     listen<{ diagnostics: string }>('argon:patch-rejected', (d) => setState((s) => ({ ...s, error: d.diagnostics, phase: 'error', logs: log(s, d.diagnostics, 'error') })))

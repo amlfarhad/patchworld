@@ -104,6 +104,19 @@ export class AutonomousLoop {
     this.send({ type: 'start-goal', goal })
   }
 
+  /** Changes the current world instead of generating a new one; earlier attempts stay in the history. */
+  applyTwist(twist: string): void {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: 'Sync daemon is not connected.' }))
+      return
+    }
+    this.takeOver()
+    this.enabled = true
+    this.setState('awaiting-patch')
+    window.dispatchEvent(new CustomEvent('argon:goal-submitted', { detail: { goal: twist, twist: true } }))
+    this.send({ type: 'twist', twist })
+  }
+
   stepBotAndRules(level: MountedLevel | null): StepResult | null {
     if (!level) return null
     if (this.isHumanControlled) return level.stepHumanAndRules?.(++this.humanTicks, this.humanTicks / 60) ?? null

@@ -21,7 +21,7 @@ export default function App() {
   const startGoal = (goal: string) => host?.autonomousLoop.startGoal(goal)
   const takeover = () => { host?.autonomousLoop.takeOver(); document.querySelector<HTMLCanvasElement>('.engine-canvas')?.focus({ preventScroll: true }) }
   const reset = () => { void host?.resetLevel().catch((e: unknown) => window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: String(e) }))) }
-  const twist = (value: string) => startGoal(`${state.goal || 'Modify the current physics world'}. Add this feature: ${value}`)
+  const twist = (value: string) => host?.autonomousLoop.applyTwist(value)
 
   return <main className={`sandbox-shell ${state.hasLevel ? 'world-loaded' : 'world-empty'} ${focusMode ? 'focus-mode' : ''}`}>
     <Viewport onReady={setHost} />
