@@ -351,9 +351,8 @@ test('critiqueAndPatchWorld uses Managed Agent critique output when agent succee
   assert.equal(createCalls.length, 2)
   assert.equal(createCalls[0]?.agent, 'antigravity-preview-09-2026')
   assert.equal(createCalls[0]?.environment, 'remote')
-  const agentInput = createCalls[0]?.input as Array<{ type: string; uri?: string }>
-  assert.equal(agentInput[0]?.type, 'video')
-  assert.equal(agentInput[0]?.uri, 'https://example.com/run2.webm')
+  assert.equal(typeof createCalls[0]?.input, 'string')
+  assert.ok(String(createCalls[0]?.input).includes('Goal not reached'))
   assert.equal(patch.diagnosis, 'Sandbox calculation: boulder needs vx >= 14.2 m/s to clear the gap.')
   assert.ok(events.some((e) => e.critiqueFinal && e.critiqueText?.includes('vx >= 14.2 m/s')))
 })

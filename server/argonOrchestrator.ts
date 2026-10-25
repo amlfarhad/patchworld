@@ -691,7 +691,7 @@ export function buildCritiquePrompt(
     '2. Directional contact over proximity: Check that interactive objects fire on the specific physical contact implied by the goal (hit from below, stomp from above, direct touch/collision), never on mere proximity.',
     '3. Finite rewards & reachability: Check that rewards/spawns are finite unless the goal requests endless spawning, and that every interactive object is physically reachable by both the bot and a human player.',
     '4. Bot mechanic coverage: Check that stepBotAndRules exercises the level\'s main mechanics on its way to the goal (uses the declared jump/ability, hits interactive blocks/targets) rather than taking a straight run to the goal.',
-    'Write a concise, plain-text diagnosis citing video timestamps, telemetry events, and exact control/mechanic defects to fix. Do not output code or JSON in this critique step.',
+    'Write a concise, plain-text diagnosis (2-4 sentences) citing timestamps/frames, telemetry events, and exact control/mechanic defects to fix. Do not output code or JSON in this critique step. If you have a code execution sandbox, run at most one fast calculation only if strictly necessary; do not inspect files or run multi-step scripts.',
     `Iteration: ${input.iteration}`,
     `Failure: ${failureReason}`,
     `Telemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):`,
@@ -1008,17 +1008,14 @@ export class ArgonOrchestrator {
   ): Promise<{ id: string; text: string }> {
     const chainedAgentId = resolveChainedInteractionId(previousInteractionId, 'agent')
     const timeoutMs = options.timeoutMs ?? this.managedAgentTimeoutMs
-    const input = options.video?.uri
-      ? [
-          { type: 'video' as const, uri: options.video.uri, mime_type: options.video.mimeType ?? 'video/webm' },
-          { type: 'text' as const, text: prompt },
-        ]
-      : prompt
+    // Note: Managed Agent ('antigravity-preview-09-2026', environment: 'remote') is a text + Python sandbox
+    // endpoint and rejects `{ type: 'video' }` content parts with HTTP 400 ("Video input is not supported.").
+    // Always pass the telemetry + code prompt as text input so the agent succeeds without a 400 error.
     const interaction = await this.ai.interactions.create({
       agent: managedAgent,
       environment: 'remote',
       ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
-      input,
+      input: prompt,
       background: true,
     })
     interactionKinds.set(interaction.id, 'agent')
@@ -1042,40 +1039,53 @@ export class ArgonOrchestrator {
     const videoPath = join(tmpdir(), `argon-${randomUUID()}.webm`)
     await writeFile(videoPath, input.videoBytes)
     try {
-      this.emit({ phase: 'critiquing', message: 'Uploading the failed run for playtest critique…', iteration: input.iteration })
-      const uploadStart = performance.now()
-      const uploadedVideo = await this.ai.files.upload({
-        file: videoPath,
-        config: { mimeType: 'video/webm' },
-      })
-      const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
-      timings.uploadMs = Math.round(performance.now() - uploadStart)
-
       const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
       const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+      const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
+
+      this.emit({
+        phase: 'critiquing',
+        message: 'Running Managed Agent playtest critique on telemetry and level code…',
+        iteration: input.iteration,
+      })
+
+      // Start the WebM upload in parallel so Managed Agent critique starts immediately (saving ~4-5s),
+      // while keeping the uploaded video ready if fallback to multimodal streamed critique is needed.
+      const uploadStart = performance.now()
+      const uploadPromise = this.ai.files
+        .upload({
+          file: videoPath,
+          config: { mimeType: 'video/webm' },
+        })
+        .then((uploadedVideo) => waitForUploadedFileActive(this.ai.files, uploadedVideo))
+        .then((activeVideo) => {
+          timings.uploadMs = Math.round(performance.now() - uploadStart)
+          return activeVideo
+        })
 
       const critiqueStart = performance.now()
-      const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
       let critiqueText: string
       try {
         const agentCritique = await this.runManagedAgentCritique(
           critiquePrompt,
           input.previousInteractionId,
           {
-            video: activeVideo,
             timeoutMs: this.managedAgentTimeoutMs,
             iteration: input.iteration,
           },
         )
         critiqueText = agentCritique.text
+        await uploadPromise.catch(() => undefined)
       } catch {
         this.emit({
           phase: 'critiquing',
           message: 'Streaming multimodal video and telemetry critique…',
           iteration: input.iteration,
         })
+        const activeVideo = await uploadPromise
         critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
       }
+      timings.uploadMs = timings.uploadMs ?? Math.round(performance.now() - uploadStart)
       timings.critiqueMs = Math.round(performance.now() - critiqueStart)
 
       this.emit({
