@@ -4,6 +4,7 @@ import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
 import type { GeneratedFile } from './generatedFiles.ts'
 
@@ -18,6 +19,8 @@ export interface OrchestratorEvent {
   diagnosis?: string
   skillContent?: string
   terminal?: string
+  durationMs?: number
+  timings?: Record<string, number>
 }
 
 export interface GeneratedPatch {
@@ -25,6 +28,7 @@ export interface GeneratedPatch {
   interactionId: string
   skillContent?: string
   diagnosis?: string
+  timings?: Record<string, number>
 }
 
 export interface FailedRunInput {
@@ -52,7 +56,7 @@ interface GeneratedLevelModule {
 Implement onPointerOrKey and stepHumanAndRules for interactive play after autonomous success. Human updates must not apply bot actions. Keep visuals in sync with bodies in both modes.
 Import THREE from 'three' and RAPIER from '@dimforge/rapier3d-compat'. Keep all generated files as direct children of src/generated/.
 Return one JSON object only: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"short summary with video timestamps when available","skillContent":"Markdown physical invariants learned from evidence, or empty when none"}.
-Include activeLevel.ts in every patch. Never use eval, Function, remote script loading, or write outside src/generated/.
+For patches, return only the files in src/generated/ that changed. Never use eval, Function, remote script loading, or write outside src/generated/.
 `
 
 const fileUploadTimeoutMs = 60_000
@@ -127,6 +131,31 @@ export function resolveChainedInteractionId(
   const recordedKind = interactionKinds.get(previousInteractionId)
   if (recordedKind && recordedKind !== targetKind) return undefined
   return previousInteractionId
+}
+
+export function mergeWithCurrentFiles(
+  proposedFiles: GeneratedFile[],
+  currentFiles: GeneratedFile[] = [],
+): GeneratedFile[] {
+  if (currentFiles.length === 0) return proposedFiles
+  const merged = new Map<string, GeneratedFile>()
+  for (const existing of currentFiles) {
+    merged.set(existing.path, existing)
+  }
+  for (const updated of proposedFiles) {
+    merged.set(updated.path, updated)
+  }
+  return [...merged.values()]
+}
+
+export function filterChangedFiles(
+  proposedFiles: GeneratedFile[],
+  currentFiles: GeneratedFile[] = [],
+): GeneratedFile[] {
+  if (currentFiles.length === 0) return proposedFiles
+  const currentByPath = new Map(currentFiles.map((file) => [file.path, file.content]))
+  const changed = proposedFiles.filter((file) => currentByPath.get(file.path) !== file.content)
+  return changed.length > 0 ? changed : proposedFiles.slice(0, 1)
 }
 
 export type TelemetryFrame = PlaytestFailedMetadata['telemetry'][number]
@@ -261,8 +290,11 @@ export class ArgonOrchestrator {
   }
 
   async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
+    const startedAt = performance.now()
+    const timings: Record<string, number> = {}
     const prompt = `Create a complete physics sandbox level for this goal: ${goal}\n\n${levelContract}`
     this.emit({ phase: 'synthesizing', message: 'Synthesizing the first physics world…' })
+    const synthStart = performance.now()
     const interaction = await this.ai.interactions.create({
       model,
       background: true,
@@ -275,24 +307,35 @@ export class ArgonOrchestrator {
     })
     interactionKinds.set(interaction.id, 'model')
     const completed = await this.waitForInteraction(interaction.id, 'Long-decode world generation')
-    return this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt)
+    timings.synthesisMs = Math.round(performance.now() - synthStart)
+    const result = await this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt, [], timings)
+    timings.totalMs = Math.round(performance.now() - startedAt)
+    this.emit({ phase: 'synthesized', message: `Initial world synthesized in ${timings.totalMs}ms.`, durationMs: timings.totalMs, timings })
+    return { ...result, timings }
   }
 
   async critiqueAndPatchWorld(
     input: FailedRunInput,
     validate: (files: GeneratedFile[]) => Promise<string[]>,
   ): Promise<GeneratedPatch> {
+    const startedAt = performance.now()
+    const timings: Record<string, number> = {}
     const videoPath = join(tmpdir(), `argon-${randomUUID()}.webm`)
     await writeFile(videoPath, input.videoBytes)
     try {
       this.emit({ phase: 'critiquing', message: 'Uploading the failed run for managed-agent critique…', iteration: input.iteration })
+      const uploadStart = performance.now()
       const uploadedVideo = await this.ai.files.upload({
         file: videoPath,
         config: { mimeType: 'video/webm' },
       })
       const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
+      timings.uploadMs = Math.round(performance.now() - uploadStart)
+
       const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
-      const prompt = `Inspect the attached browser playtest video and the compacted frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return a complete patched file set and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):\n${JSON.stringify(compactTelemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
+      const prompt = `Inspect the attached browser playtest video and the compacted frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return only the files in src/generated/ that changed and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):\n${JSON.stringify(compactTelemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
+
+      const critiqueStart = performance.now()
       const chainedAgentId = resolveChainedInteractionId(input.previousInteractionId, 'agent')
       const interaction = await this.ai.interactions.create({
         agent: managedAgent,
@@ -306,7 +349,25 @@ export class ArgonOrchestrator {
       })
       interactionKinds.set(interaction.id, 'agent')
       const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique')
-      return this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt)
+      timings.critiqueMs = Math.round(performance.now() - critiqueStart)
+
+      const patched = await this.parseAndRepair(
+        extractInteractionText(completed),
+        interaction.id,
+        validate,
+        prompt,
+        input.currentFiles,
+        timings,
+      )
+      timings.totalMs = Math.round(performance.now() - startedAt)
+      this.emit({
+        phase: 'patched',
+        message: `Critique and patch completed in ${timings.totalMs}ms (upload ${timings.uploadMs}ms, critique ${timings.critiqueMs}ms).`,
+        iteration: input.iteration,
+        durationMs: timings.totalMs,
+        timings,
+      })
+      return { ...patched, timings }
     } finally {
       await rm(videoPath, { force: true })
     }
@@ -317,27 +378,41 @@ export class ArgonOrchestrator {
     interactionId: string,
     validate: (files: GeneratedFile[]) => Promise<string[]>,
     originalPrompt: string,
+    currentFiles: GeneratedFile[] = [],
+    timings: Record<string, number> = {},
   ): Promise<GeneratedPatch> {
+    const typecheckStart = performance.now()
     let candidate = parsePatch(output)
-    let diagnostics = await validate(candidate.files)
+    let diagnostics = await validate(mergeWithCurrentFiles(candidate.files, currentFiles))
+    timings.typecheckMs = Math.round(performance.now() - typecheckStart)
+
     if (diagnostics.length > 0) {
+      const repairStart = performance.now()
       this.emit({ phase: 'typecheck-retry', message: 'TypeScript rejected the draft; sending diagnostics for one repair pass.' })
       const chainedModelId = resolveChainedInteractionId(interactionId, 'model')
       const repair = await this.ai.interactions.create({
         model,
         background: true,
         ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
-        input: `${originalPrompt}\n\nCompiler diagnostics from the proposed files (repair once):\n${diagnostics.join('\n')}\nReturn the full corrected file set as the required JSON object.`,
-        generation_config: { max_output_tokens: 65_536, thinking_level: 'high' },
+        input: `${originalPrompt}\n\nCompiler diagnostics from the proposed files (repair once):\n${diagnostics.join('\n')}\nReturn only the corrected changed file set as the required JSON object.`,
+        generation_config: { max_output_tokens: 65_536, thinking_level: 'low' },
       })
       interactionKinds.set(repair.id, 'model')
       const completed = await this.waitForInteraction(repair.id, 'TypeScript repair pass')
       candidate = parsePatch(extractInteractionText(completed))
-      diagnostics = await validate(candidate.files)
+      diagnostics = await validate(mergeWithCurrentFiles(candidate.files, currentFiles))
+      timings.repairMs = Math.round(performance.now() - repairStart)
       if (diagnostics.length > 0) throw new Error(`Generated TypeScript still fails after one repair pass:\n${diagnostics.join('\n')}`)
       interactionId = repair.id
     }
-    return { files: candidate.files, diagnosis: candidate.diagnosis, skillContent: candidate.skillContent, interactionId }
+    const changedFiles = filterChangedFiles(candidate.files, currentFiles)
+    return {
+      files: changedFiles,
+      diagnosis: candidate.diagnosis,
+      skillContent: candidate.skillContent,
+      interactionId,
+      timings,
+    }
   }
 
   private async waitForInteraction(id: string, label: string) {
