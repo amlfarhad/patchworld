@@ -40,6 +40,12 @@ export function validateGeneratedFiles(value: unknown): GeneratedFile[] {
   )
 }
 
+/**
+ * Unused locals, parameters, imports and labels: lint rules from tsconfig, not runtime problems.
+ * A generated level with an unused variable runs fine, so it should not cost a model repair pass.
+ */
+const lintOnlyCodes = new Set([6133, 6138, 6192, 6196, 6198, 6199, 6205, 7027, 7028])
+
 export async function checkGeneratedTypeScript(
   files: GeneratedFile[],
   projectRoot: string,
@@ -78,7 +84,7 @@ export async function checkGeneratedTypeScript(
   const program = ts.createProgram({ rootNames, options: parsed.options, host, oldProgram: previousProgram })
   previousProgram = program
   const diagnostics = ts.getPreEmitDiagnostics(program)
-    .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
+    .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error && !lintOnlyCodes.has(diagnostic.code))
   return diagnostics.length === 0 ? [] : [formatDiagnostics(diagnostics, projectRoot)]
 }
 
