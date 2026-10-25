@@ -2,8 +2,9 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import RAPIER from '@dimforge/rapier3d-compat'
 import { AutonomousLoop } from './AutonomousLoop'
+import { checkDeclaredControls } from './controlCheck'
 import { evaluateLevelGoal } from './goalEvaluator'
-import type { ContactSnapshot, GeneratedLevelModule, MountedLevel, StepResult } from './types'
+import type { ContactSnapshot, ControlBinding, GeneratedLevelModule, MountedLevel, StepResult } from './types'
 
 const rapierReady = RAPIER.init()
 
@@ -35,7 +36,7 @@ export class EngineHost {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
-    this.autonomousLoop = new AutonomousLoop(canvas)
+    this.autonomousLoop = new AutonomousLoop(canvas, undefined, () => this.checkControls())
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
@@ -139,6 +140,11 @@ export class EngineHost {
 
   dispatchPointerOrKey(event: { type: string; key?: string; code?: string; ndc?: [number, number] }): void {
     if (this.autonomousLoop.isHumanControlled) this.levelHandle?.onPointerOrKey?.(event)
+  }
+
+  checkControls(levelModule: GeneratedLevelModule | null = this.currentModule): ControlBinding[] {
+    if (!levelModule) return []
+    return checkDeclaredControls(levelModule)
   }
 
   resizeViewport(): void {
