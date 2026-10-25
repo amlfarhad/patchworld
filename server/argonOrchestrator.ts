@@ -129,6 +129,128 @@ export function resolveChainedInteractionId(
   return previousInteractionId
 }
 
+export type TelemetryFrame = PlaytestFailedMetadata['telemetry'][number]
+
+export interface TelemetryContactEvent {
+  frame: number
+  timestampMs: number
+  bodyA: string
+  bodyB: string
+  totalForce: number
+}
+
+export interface TelemetryFallEvent {
+  frame: number
+  timestampMs: number
+  body: string
+  y: number
+  thresholdY: number
+}
+
+export interface TelemetryKeyEvents {
+  firstContact: TelemetryContactEvent | null
+  peakForce: TelemetryContactEvent | null
+  fellBelowHeight: TelemetryFallEvent[]
+}
+
+export interface ShrunkTelemetry {
+  totalFrames: number
+  sampledFrames: number
+  keyEvents: TelemetryKeyEvents
+  frames: TelemetryFrame[]
+}
+
+export function round3(value: number): number {
+  return Math.round(value * 1_000) / 1_000
+}
+
+export function roundTuple3(tuple: [number, number, number]): [number, number, number] {
+  return [round3(tuple[0]), round3(tuple[1]), round3(tuple[2])]
+}
+
+export function isBodyAtRest(
+  body: { linvel: [number, number, number]; angvel: [number, number, number] },
+  restEpsilon = 0.001,
+): boolean {
+  const linSpeed = Math.hypot(body.linvel[0], body.linvel[1], body.linvel[2])
+  const angSpeed = Math.hypot(body.angvel[0], body.angvel[1], body.angvel[2])
+  return linSpeed <= restEpsilon && angSpeed <= restEpsilon
+}
+
+export function shrinkTelemetry(
+  telemetry: TelemetryFrame[],
+  options: { frameStride?: number; restEpsilon?: number; fallBelowY?: number } = {},
+): ShrunkTelemetry {
+  const frameStride = Math.max(1, options.frameStride ?? 4)
+  const restEpsilon = options.restEpsilon ?? 0.001
+  const fallBelowY = options.fallBelowY ?? 0
+
+  let firstContact: TelemetryContactEvent | null = null
+  let peakForce: TelemetryContactEvent | null = null
+  const fellBodies = new Set<string>()
+  const fellBelowHeight: TelemetryFallEvent[] = []
+
+  for (const snapshot of telemetry) {
+    for (const contact of snapshot.contacts) {
+      const event: TelemetryContactEvent = {
+        frame: snapshot.frame,
+        timestampMs: snapshot.timestampMs,
+        bodyA: contact.bodyA,
+        bodyB: contact.bodyB,
+        totalForce: round3(contact.totalForce),
+      }
+      if (!firstContact) firstContact = event
+      if (!peakForce || event.totalForce > peakForce.totalForce) {
+        peakForce = event
+      }
+    }
+    for (const body of snapshot.bodies) {
+      if (!fellBodies.has(body.name) && body.pos[1] < fallBelowY) {
+        fellBodies.add(body.name)
+        fellBelowHeight.push({
+          frame: snapshot.frame,
+          timestampMs: snapshot.timestampMs,
+          body: body.name,
+          y: round3(body.pos[1]),
+          thresholdY: fallBelowY,
+        })
+      }
+    }
+  }
+
+  const frames = telemetry
+    .filter((_, index) => index % frameStride === 0)
+    .map((snapshot) => ({
+      frame: snapshot.frame,
+      timestampMs: snapshot.timestampMs,
+      botState: snapshot.botState,
+      bodies: snapshot.bodies
+        .filter((body) => !isBodyAtRest(body, restEpsilon))
+        .map((body) => ({
+          name: body.name,
+          pos: roundTuple3(body.pos),
+          linvel: roundTuple3(body.linvel),
+          angvel: roundTuple3(body.angvel),
+        })),
+      contacts: snapshot.contacts.map((contact) => ({
+        bodyA: contact.bodyA,
+        bodyB: contact.bodyB,
+        totalForce: round3(contact.totalForce),
+      })),
+    }))
+
+  return {
+    totalFrames: telemetry.length,
+    sampledFrames: frames.length,
+    keyEvents: {
+      firstContact,
+      peakForce,
+      fellBelowHeight,
+    },
+    frames,
+  }
+}
+
 export class ArgonOrchestrator {
   private readonly ai: GoogleGenAI
 
@@ -169,7 +291,8 @@ export class ArgonOrchestrator {
         config: { mimeType: 'video/webm' },
       })
       const activeVideo = await waitForUploadedFileActive(this.ai.files, uploadedVideo)
-      const prompt = `Inspect the attached browser playtest video and the frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return a complete patched file set and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry (${input.metadata.frameCount} frames):\n${JSON.stringify(input.metadata.telemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
+      const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
+      const prompt = `Inspect the attached browser playtest video and the compacted frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return a complete patched file set and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry summary (${compactTelemetry.sampledFrames} sampled of ${input.metadata.frameCount} frames, 3-decimal rounded, resting bodies omitted):\n${JSON.stringify(compactTelemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
       const chainedAgentId = resolveChainedInteractionId(input.previousInteractionId, 'agent')
       const interaction = await this.ai.interactions.create({
         agent: managedAgent,
