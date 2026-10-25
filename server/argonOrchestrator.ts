@@ -203,6 +203,7 @@ ${outputInstructions}`,
     let candidate = parsePatch(output)
     let diagnostics = await validate(candidate.files)
     if (diagnostics.length > 0) {
+      console.log(`[Argon] TypeScript rejected the draft:\n${diagnostics.join('\n').replace(/\x1b\[[0-9;]*m/g, '').slice(0, 3_000)}`)
       this.emit({ phase: 'typecheck-retry', message: 'TypeScript rejected the draft; sending the compiler errors back for one repair pass.' })
       const repair = await this.stream({
         label: 'TypeScript repair',

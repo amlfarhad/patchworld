@@ -5,15 +5,16 @@ import { parsePatch } from './argonOrchestrator.ts'
 import type { FrameSnapshot } from '../src/engine/TelemetryRecorder'
 
 function ledger(frameCount: number, extraBodies = 0): FrameSnapshot[] {
+  type V = [number, number, number]
   return Array.from({ length: frameCount }, (_unused, index) => ({
     frame: index + 1,
     timestampMs: Math.round(index * 33.333),
     botState: index < 15 ? 'aiming' : 'launched',
     contacts: index === 40 ? [{ bodyA: 'boss', bodyB: 'boulder', totalForce: 812.3456 }] : [],
     bodies: [
-      { name: 'boulder', pos: [index * 0.05, 1 - index * 0.04, 0], linvel: [3, -1.2, 0], angvel: [0, 0, 0] },
-      { name: 'ground', pos: [0, 0, 0], linvel: [0, 0, 0], angvel: [0, 0, 0] },
-      ...Array.from({ length: extraBodies }, (_body, n) => ({ name: `debris${n}`, pos: [n + index * 0.01, 2.123456, 0], linvel: [0.1, 0, 0], angvel: [0, 0, 0] })),
+      { name: 'boulder', pos: [index * 0.05, 1 - index * 0.04, 0] as V, linvel: [3, -1.2, 0] as V, angvel: [0, 0, 0] as V },
+      { name: 'ground', pos: [0, 0, 0] as V, linvel: [0, 0, 0] as V, angvel: [0, 0, 0] as V },
+      ...Array.from({ length: extraBodies }, (_body, n) => ({ name: `debris${n}`, pos: [n + index * 0.01, 2.123456, 0] as V, linvel: [0.1, 0, 0] as V, angvel: [0, 0, 0] as V })),
     ],
   }))
 }

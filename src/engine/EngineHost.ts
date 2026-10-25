@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import RAPIER from '@dimforge/rapier3d-compat'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { AutonomousLoop } from './AutonomousLoop'
+import { frameBox, measureLevel } from './cameraFraming'
 import type { ContactSnapshot, GeneratedLevelModule, MountedLevel, StepResult } from './types'
 
 const rapierReady = RAPIER.init()
@@ -27,6 +29,10 @@ export class EngineHost {
   private viewportHeight = 0
   private viewportPixelRatio = 0
   private readonly fixedStep = 1 / 60
+  private readonly controls: OrbitControls
+  /** The measured bounds of the mounted level, kept so the view can be refit on resize. */
+  private framedBox: THREE.Box3 | null = null
+  private wasHumanControlled = false
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
@@ -34,8 +40,15 @@ export class EngineHost {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     this.camera.position.set(0, 3, 8)
     this.scene.add(new THREE.HemisphereLight(0xdceeff, 0x27313a, 2))
+    // Orbit with the right mouse button and zoom with the wheel; left clicks stay with the level.
+    this.controls = new OrbitControls(this.camera, canvas)
+    this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }
+    this.controls.enableDamping = true
+    this.controls.enabled = false
     this.resize()
     window.addEventListener('resize', this.resize)
   }
@@ -96,6 +109,7 @@ export class EngineHost {
     this.frameIndex = 0
     this.accumulator = 0
     this.currentModule = levelModule
+    this.frameLevel()
     window.dispatchEvent(new CustomEvent('argon:level-mounted', { detail: { hasLevel: nextBodies.size > 0 || nextRoot.children.length > 0, bodyCount: nextBodies.size } }))
     this.autonomousLoop.onLevelMounted()
   }
@@ -121,6 +135,7 @@ export class EngineHost {
     window.removeEventListener('resize', this.resize)
     this.clearCurrentLevel()
     this.autonomousLoop.dispose()
+    this.controls.dispose()
     this.eventQueue?.free()
     this.renderer.dispose()
   }
@@ -137,6 +152,20 @@ export class EngineHost {
     this.renderer.setSize(width, height, false)
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
+    if (this.framedBox && !this.autonomousLoop.isHumanControlled) this.controls.target.copy(frameBox(this.camera, this.framedBox))
+  }
+
+  /** Fits the camera to the mounted level so every generated world is on screen and clear of the HUD. */
+  private frameLevel(): void {
+    if (!this.levelRoot) return
+    const positions = [...this.namedBodies.values()].map((body) => {
+      const { x, y, z } = body.translation()
+      return new THREE.Vector3(x, y, z)
+    })
+    this.framedBox = measureLevel(this.levelRoot, positions)
+    if (!this.framedBox) return
+    this.controls.target.copy(frameBox(this.camera, this.framedBox))
+    this.controls.update()
   }
 
   private readonly tick = (now: number): void => {
@@ -165,6 +194,14 @@ export class EngineHost {
       )
     }
 
+    const human = this.autonomousLoop.isHumanControlled
+    if (human !== this.wasHumanControlled) {
+      this.wasHumanControlled = human
+      this.controls.enabled = human
+      // Bot runs are recorded for the critic, so they always use the framed view.
+      if (!human && this.framedBox) this.controls.target.copy(frameBox(this.camera, this.framedBox))
+    }
+    if (human) this.controls.update()
     this.renderer.render(this.scene, this.camera)
     this.animationFrame = window.requestAnimationFrame(this.tick)
   }
