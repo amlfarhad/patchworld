@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Frown, RotateCcw, Sparkles, Trophy, X } from 'lucide-react'
 import type { HumanResult, SandboxState } from '../hooks/useSandbox'
 import { describeGoal } from './levelText'
+import { OPEN_TWIST_EVENT } from './buildStages'
 
 /** Win and lose screens for a person playing the level after the handoff. */
 export function HumanResultScreen({ state, onPlayAgain }: { state: SandboxState; onPlayAgain: () => void }) {
@@ -14,7 +15,7 @@ export function HumanResultScreen({ state, onPlayAgain }: { state: SandboxState;
   const won = result.outcome === 'won'
   const attempts = state.replays.length
   const misses = state.replays.filter((r) => r.failed).length
-  const twist = () => { setDismissed(result); window.setTimeout(() => document.getElementById('world-twist')?.focus(), 0) }
+  const twist = () => { setDismissed(result); window.dispatchEvent(new CustomEvent(OPEN_TWIST_EVENT)) }
   return <div className="result-layer" role="alertdialog" aria-labelledby="result-title" aria-describedby="result-detail" onKeyDown={(e) => { if (e.key === 'Escape') setDismissed(result) }}>
     <section className={`result-card glass-panel ${won ? 'result-won' : 'result-lost'}`}>
       <button type="button" className="icon-button result-close" onClick={() => setDismissed(result)} aria-label="Close and keep playing"><X size={16} /></button>
