@@ -9,6 +9,7 @@ import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } 
 import type { GeneratedPatch } from './argonOrchestrator.ts'
 import { createWorldOrchestrator, mockScriptFromArgs, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.ts'
 import { RunRecorder, type RecordedStep } from './runRecorder.ts'
+import { findCachedScript } from './mockOrchestrator.ts'
 
 type ClientRole = 'browser' | 'agent'
 
@@ -31,6 +32,8 @@ const skillPath = resolve(projectRoot, '.agents/SKILL.md')
 const runsRoot = resolve(projectRoot, 'artifacts/runs')
 /** Set by --mock[=name or folder] or ARGON_MOCK: replay a scripted run instead of calling Gemini. */
 const mockScript = mockScriptFromArgs()
+/** A quick-start preset with a recorded run replays it instead of calling Gemini (twists still go live). */
+let goalScript: string | null = null
 let goalEpoch = 0
 let activeGoal = ''
 /** The goal the world on screen was built for; unlike activeGoal it survives pause and completion. */
@@ -74,7 +77,7 @@ function emitProgress(event: WorldEvent): void {
 }
 
 function createOrchestrator(epoch: number): WorldOrchestrator {
-  return createWorldOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) }, { mockScript, projectRoot })
+  return createWorldOrchestrator((event) => { if (epoch === goalEpoch) emitProgress(event) }, { mockScript: mockScript ?? goalScript, projectRoot })
 }
 
 async function recordStep(step: RecordedStep): Promise<void> {
@@ -203,7 +206,7 @@ function beginGoal(goal: string): number {
   awaitingLevelMount = false
   history = []
   publishHistory()
-  recording = mockScript ? null : RunRecorder.start(goal, runsRoot).catch((error: unknown) => {
+  recording = mockScript || goalScript ? null : RunRecorder.start(goal, runsRoot).catch((error: unknown) => {
     console.warn('[Argon sync] Could not start recording this run:', error)
     return null
   })
@@ -223,6 +226,7 @@ async function startGoal(socket: WebSocket, goal: string): Promise<void> {
     sendJson(socket, { type: 'goal-error', message: 'Enter a level goal between 1 and 2,000 characters.' })
     return
   }
+  goalScript = mockScript ? null : await findCachedScript(goal, projectRoot)
   const epoch = beginGoal(goal.trim())
   engineSocket = socket
   sendToRole('browser', { type: 'start-goal-accepted', goal: activeGoal })
@@ -248,6 +252,7 @@ async function startTwist(socket: WebSocket, twist: string): Promise<void> {
   const combinedGoal = baseGoal ? `${baseGoal} Twist: ${text}` : text
   // Take ownership first: bumping the epoch drops any critique patch still in flight.
   const epoch = ++goalEpoch
+  goalScript = null
   const orchestrator = createOrchestrator(epoch)
   if (!baseGoal || !orchestrator.reviseWorld) return startGoal(socket, combinedGoal)
   clearMountWatchdog()

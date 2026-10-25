@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { FailedRunInput, GeneratedPatch } from './argonOrchestrator.ts'
 import { validateGeneratedFiles, type GeneratedFile } from './generatedFiles.ts'
@@ -26,6 +26,19 @@ export async function resolveMockScriptPath(nameOrPath: string, projectRoot: str
   }
   const target = isAbsolute(nameOrPath) ? nameOrPath : resolve(projectRoot, nameOrPath)
   return (await stat(target)).isDirectory() ? resolve(target, 'script.json') : target
+}
+
+/** The recorded Gemini run (src/fixtures/cached-<name>.script.json) for exactly this goal, i.e. a quick-start preset. */
+export async function findCachedScript(goal: string, projectRoot: string): Promise<string | null> {
+  const folder = resolve(projectRoot, 'src/fixtures')
+  const names = (await readdir(folder).catch(() => [] as string[])).filter((name) => /^cached-.+.script.json$/.test(name))
+  for (const name of names) {
+    try {
+      const script = JSON.parse(await readFile(resolve(folder, name), 'utf8')) as { goal?: unknown }
+      if (script.goal === goal.trim()) return name.replace(/.script.json$/, '')
+    } catch { /* A broken script is skipped; the goal then runs live. */ }
+  }
+  return null
 }
 
 export async function loadMockScript(nameOrPath: string, projectRoot: string): Promise<MockScript> {
