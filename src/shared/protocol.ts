@@ -18,7 +18,7 @@ export interface PlaytestPassedMessage {
 export interface IterationEntry {
   iteration: number
   /** `pending` until the playtest of this iteration's level finishes. */
-  outcome: 'pending' | 'passed' | 'failed' | 'mount-failed'
+  outcome: 'pending' | 'passed' | 'failed' | 'mount-failed' | 'abandoned'
   /** Generated files this iteration wrote. */
   files: string[]
   /** The critique that produced this iteration's patch (absent for the first draft). */
