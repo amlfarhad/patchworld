@@ -113,7 +113,7 @@ export class AutonomousLoop {
     this.takeOver()
     this.enabled = true
     this.setState('awaiting-patch')
-    window.dispatchEvent(new CustomEvent('argon:goal-submitted', { detail: `Twist: ${twist}` }))
+    window.dispatchEvent(new CustomEvent('argon:goal-submitted', { detail: { goal: twist, twist: true } }))
     this.send({ type: 'twist', twist })
   }
 

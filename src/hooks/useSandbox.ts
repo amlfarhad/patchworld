@@ -88,9 +88,10 @@ export function useSandbox() {
     })
     listen<string>('argon:select-replay', (runId) => setState((s) => ({ ...s, replay: s.replays.find((r) => r.runId === runId) ?? s.replay })))
     listen<boolean>('argon:human-won', () => setState((s) => ({ ...s, humanWon: true })))
-    listen<string>('argon:goal-submitted', (goal) => setState((s) => {
+    listen<string | { goal: string; twist: boolean }>('argon:goal-submitted', (detail) => setState((s) => {
       // A twist keeps the earlier attempts; a brand-new goal starts a fresh history.
-      const keep = goal.startsWith('Twist: ')
+      const keep = typeof detail !== 'string' && detail.twist
+      const goal = typeof detail === 'string' ? detail : detail.goal
       if (!keep) s.replays.forEach((r) => { URL.revokeObjectURL(r.videoUrl); videoUrls.delete(r.videoUrl) })
       return {
         ...s, goal: keep ? s.goal : goal, error: '', phase: 'synthesizing', human: false, humanWon: false,

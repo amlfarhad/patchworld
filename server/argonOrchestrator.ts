@@ -19,6 +19,8 @@ const callTimeoutMs = Math.max(30_000, Number(process.env.ARGON_CALL_TIMEOUT_MS)
 /** Inline video is fastest; larger recordings go through the Files API instead. */
 const maxInlineVideoBytes = 14 * 1024 * 1024
 const progressIntervalMs = 1_500
+/** A stream that sends nothing for this long is treated as stalled (thinking still emits events). */
+const streamIdleMs = Math.max(20_000, Number(process.env.ARGON_STREAM_IDLE_MS) || 120_000)
 const skillPath = resolve(process.cwd(), '.agents/SKILL.md')
 
 export type OrchestratorEvent = {
@@ -223,8 +225,15 @@ ${levelContract}`,
       previousInteractionId: request.previousInteractionId,
       format: editFormat,
     })
-    const parsed = parseEditPatch(result.text)
-    const { files: edited, errors } = applyEdits(request.currentFiles, parsed.edits)
+    let parsed: ReturnType<typeof parseEditPatch> = { edits: [], files: [] }
+    let errors: string[] = []
+    let edited: GeneratedFile[] = []
+    try {
+      parsed = parseEditPatch(result.text)
+      ;({ files: edited, errors } = applyEdits(request.currentFiles, parsed.edits))
+    } catch (error) {
+      errors = [error instanceof Error ? error.message : String(error)]
+    }
     if (errors.length > 0 || (parsed.edits.length === 0 && parsed.files.length === 0)) {
       const reason = errors.length > 0 ? errors.join('\n') : 'The response contained no edits.'
       console.log(`[Argon] ${request.label} edits did not apply; asking for whole files:\n${reason}`)
@@ -282,6 +291,7 @@ ${levelContract}`,
 
     let id = ''
     let text = ''
+    let completed = false
     let lastProgress = 0
     const progress = (message: string) => {
       const now = Date.now()
@@ -289,9 +299,20 @@ ${levelContract}`,
       lastProgress = now
       this.emit({ phase: 'thinking', message: `${options.label}: ${message} (${Math.round((now - started) / 1000)} s)` })
     }
-    for await (const event of stream) {
+    const iterator = stream[Symbol.asyncIterator]()
+    for (;;) {
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<never>((_resolve, reject) => {
+          idleTimer = setTimeout(() => reject(new Error(`${options.label} stalled: no data from Gemini for ${Math.round(streamIdleMs / 1000)} s`)), streamIdleMs)
+        }),
+      ]).finally(() => clearTimeout(idleTimer))
+      if (next.done) break
+      const event = next.value
       if (event.event_type === 'interaction.created' || event.event_type === 'interaction.completed') {
         id ||= event.interaction.id
+        if (event.event_type === 'interaction.completed') completed = true
         const status = (event.interaction as { status?: string }).status
         if (event.event_type === 'interaction.completed' && status && status !== 'completed') {
           throw new Error(`${options.label} ended with status ${status}`)
@@ -309,6 +330,7 @@ ${levelContract}`,
         throw new Error(`${options.label} failed: ${error?.message ?? 'unknown error'}`)
       }
     }
+    if (!completed) throw new Error(`${options.label} ended before Gemini finished the response`)
     if (!id) throw new Error(`${options.label} returned no interaction id`)
     if (!text.trim()) throw new Error(`${options.label} returned no text`)
     console.log(`[Argon] ${options.label} finished in ${((Date.now() - started) / 1000).toFixed(1)} s, ${text.length} chars`)

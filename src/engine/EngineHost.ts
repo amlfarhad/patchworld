@@ -229,6 +229,7 @@ export class EngineHost {
     this.world?.free()
     this.levelHandle = null
     this.levelRoot = null
+    this.framedBox = null
     this.world = null
     this.namedBodies.clear()
   }

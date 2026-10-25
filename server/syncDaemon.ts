@@ -245,18 +245,24 @@ async function startTwist(socket: WebSocket, twist: string): Promise<void> {
     return
   }
   const baseGoal = worldGoal
+  const combinedGoal = baseGoal ? `${baseGoal} Twist: ${text}` : text
+  // Take ownership first: bumping the epoch drops any critique patch still in flight.
+  const epoch = ++goalEpoch
+  const orchestrator = createOrchestrator(epoch)
+  if (!baseGoal || !orchestrator.reviseWorld) return startGoal(socket, combinedGoal)
+  clearMountWatchdog()
+  awaitingLevelMount = false
+  activeGoal = combinedGoal
+  worldGoal = combinedGoal
+  engineSocket = socket
+  // A twist continues the same history and numbering, so earlier attempts stay comparable.
+  settleLatestIteration('abandoned')
   const chainId = previousInteractionId
   const currentFiles = await readCurrentGeneratedFiles()
-  const combinedGoal = baseGoal ? `${baseGoal} Twist: ${text}` : text
-  const orchestratorProbe = createOrchestrator(goalEpoch)
-  if (!baseGoal || !orchestratorProbe.reviseWorld) return startGoal(socket, combinedGoal)
-
-  const epoch = beginGoal(combinedGoal)
-  previousInteractionId = chainId
-  engineSocket = socket
+  if (epoch !== goalEpoch) return
   sendToRole('browser', { type: 'start-goal-accepted', goal: combinedGoal })
   try {
-    const patch = await createOrchestrator(epoch).reviseWorld!({ goal: baseGoal, twist: text, currentFiles, previousInteractionId: chainId }, validateFiles)
+    const patch = await orchestrator.reviseWorld({ goal: baseGoal, twist: text, currentFiles, previousInteractionId: chainId }, validateFiles)
     if (epoch !== goalEpoch) return
     if (!await applyIterationPatch(patch, patch.interactionId, epoch)) return
     emitProgress({ phase: 'hmr-pending', message: 'Twist applied; waiting for the browser to mount the updated module.', iteration })
@@ -300,8 +306,11 @@ async function handleMountFailure(error: string, stack?: string): Promise<void> 
   sendToRole('agent', { type: 'level-mount-failed', error, stack })
   const wasAwaiting = awaitingLevelMount
   awaitingLevelMount = false
+  if (!wasAwaiting) {
+    emitProgress({ phase: 'error', message: `The level threw while loading: ${error}`, iteration })
+    return
+  }
   settleLatestIteration('mount-failed', { failureReason: error })
-  if (!wasAwaiting) return
   if (!activeGoal) {
     emitProgress({ phase: 'error', message: `Generated level failed to load: ${error}`, iteration })
     return
