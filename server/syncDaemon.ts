@@ -237,6 +237,35 @@ async function startGoal(socket: WebSocket, goal: string): Promise<void> {
   }
 }
 
+/** Changes the world on screen instead of generating a new one. Falls back to a fresh world when there is none. */
+async function startTwist(socket: WebSocket, twist: string): Promise<void> {
+  const text = twist.trim()
+  if (!text || text.length > 800) {
+    sendJson(socket, { type: 'goal-error', message: 'Enter a twist between 1 and 800 characters.' })
+    return
+  }
+  const baseGoal = worldGoal
+  const chainId = previousInteractionId
+  const currentFiles = await readCurrentGeneratedFiles()
+  const combinedGoal = baseGoal ? `${baseGoal} Twist: ${text}` : text
+  const orchestratorProbe = createOrchestrator(goalEpoch)
+  if (!baseGoal || !orchestratorProbe.reviseWorld) return startGoal(socket, combinedGoal)
+
+  const epoch = beginGoal(combinedGoal)
+  previousInteractionId = chainId
+  engineSocket = socket
+  sendToRole('browser', { type: 'start-goal-accepted', goal: combinedGoal })
+  try {
+    const patch = await createOrchestrator(epoch).reviseWorld!({ goal: baseGoal, twist: text, currentFiles, previousInteractionId: chainId }, validateFiles)
+    if (epoch !== goalEpoch) return
+    if (!await applyIterationPatch(patch, patch.interactionId, epoch)) return
+    emitProgress({ phase: 'hmr-pending', message: 'Twist applied; waiting for the browser to mount the updated module.', iteration })
+  } catch (error) {
+    if (epoch !== goalEpoch) return
+    reportGoalError(error, socket)
+  }
+}
+
 async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestPacket>>): Promise<void> {
   if (!activeGoal) return
   const epoch = goalEpoch
@@ -511,6 +540,7 @@ async function handleBrowserMessage(
       emitProgress({ phase: 'human', message: 'Autonomous loop paused. Human control enabled.' })
     }
     else if (message.type === 'start-goal' && typeof message.goal === 'string') void startGoal(socket, message.goal)
+    else if (message.type === 'twist' && typeof message.twist === 'string') void startTwist(socket, message.twist)
     else if (message.type === 'level-mounted') {
       if (!isEngine(socket)) return
       clearMountWatchdog()
