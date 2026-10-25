@@ -3,8 +3,8 @@
 import 'dotenv/config'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { ArgonOrchestrator } from './argonOrchestrator.ts'
-import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.ts'
+import { ArgonOrchestrator } from './argonOrchestrator.js'
+import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.js'
 
 const goal = process.argv.slice(2).join(' ').trim()
   || 'Build a catapult that launches a boulder through a bridge and drops a red boss cube into a lava pit.'

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { decodePlaytestPacket, encodePlaytestPacket } from '../src/shared/protocol.ts'
+import { decodePlaytestPacket, encodePlaytestPacket } from '../src/shared/protocol.js'
 
 test('playtest packet keeps telemetry aligned with its binary WebM payload', () => {
   const metadata = {

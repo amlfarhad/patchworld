@@ -1,9 +1,9 @@
 import { timingSafeEqual } from 'node:crypto'
 import { transform } from 'sucrase'
-import { ArgonOrchestrator, type GeneratedPatch } from '../server/argonOrchestrator.ts'
-import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from '../server/generatedFiles.ts'
-import type { ValidateFiles, WorldEvent } from '../server/orchestrator.ts'
-import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
+import { ArgonOrchestrator, type GeneratedPatch } from '../server/argonOrchestrator.js'
+import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from '../server/generatedFiles.js'
+import type { ValidateFiles, WorldEvent } from '../server/orchestrator.js'
+import type { PlaytestFailedMetadata } from '../src/shared/protocol.js'
 
 /**
  * Live mode for the hosted build. The browser runs the playtest loop and calls this function for

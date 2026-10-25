@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.ts'
+import { checkGeneratedTypeScript, validateGeneratedFiles } from './generatedFiles.js'
 
 test('generated writer accepts only direct TypeScript and GLSL children', () => {
   assert.doesNotThrow(() => validateGeneratedFiles([

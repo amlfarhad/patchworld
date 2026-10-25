@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyEdits, mergePatchFiles } from './patchEdits.ts'
-import { parseEditPatch } from './argonOrchestrator.ts'
+import { applyEdits, mergePatchFiles } from './patchEdits.js'
+import { parseEditPatch } from './argonOrchestrator.js'
 
 const level = { path: 'src/generated/activeLevel.ts', content: 'const LAUNCH = { x: -7, y: 4.5 }\ncollider.setSensor(true)\nconst SPEED = 1\n' }
 const helper = { path: 'src/generated/helpers.ts', content: 'export const g = 9.81\n' }

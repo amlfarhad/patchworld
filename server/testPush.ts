@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { WebSocket, type RawData } from 'ws'
-import { decodePlaytestPacket } from '../src/shared/protocol.ts'
+import { decodePlaytestPacket } from '../src/shared/protocol.js'
 
 interface QueuedMessage {
   data: RawData

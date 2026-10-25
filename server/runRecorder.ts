@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
-import type { GeneratedFile } from './generatedFiles.ts'
+import type { GeneratedFile } from './generatedFiles.js'
 
 export interface RecordedStep {
   files: GeneratedFile[]

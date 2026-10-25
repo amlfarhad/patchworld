@@ -1,4 +1,4 @@
-import type { GeneratedFile } from './generatedFiles.ts'
+import type { GeneratedFile } from './generatedFiles.js'
 
 /** A targeted change: replace the one occurrence of `find` in `path` with `replace`. */
 export interface FileEdit {

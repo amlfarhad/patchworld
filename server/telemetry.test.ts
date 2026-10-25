@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { compactTelemetry } from './telemetry.ts'
-import { parsePatch } from './argonOrchestrator.ts'
+import { compactTelemetry } from './telemetry.js'
+import { parsePatch } from './argonOrchestrator.js'
 import type { FrameSnapshot } from '../src/engine/TelemetryRecorder'
 
 function ledger(frameCount: number, extraBodies = 0): FrameSnapshot[] {

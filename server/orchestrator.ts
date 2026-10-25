@@ -1,6 +1,6 @@
-import { ArgonOrchestrator, type FailedRunInput, type GeneratedPatch, type OrchestratorEvent } from './argonOrchestrator.ts'
-import type { GeneratedFile } from './generatedFiles.ts'
-import { MockOrchestrator } from './mockOrchestrator.ts'
+import { ArgonOrchestrator, type FailedRunInput, type GeneratedPatch, type OrchestratorEvent } from './argonOrchestrator.js'
+import type { GeneratedFile } from './generatedFiles.js'
+import { MockOrchestrator } from './mockOrchestrator.js'
 
 export type ValidateFiles = (files: GeneratedFile[]) => Promise<string[]>
 

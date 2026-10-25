@@ -3,11 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import type { FailedRunInput } from './argonOrchestrator.ts'
-import { checkGeneratedTypeScript } from './generatedFiles.ts'
-import { loadMockScript, MockOrchestrator } from './mockOrchestrator.ts'
-import { mockScriptFromArgs, type WorldEvent } from './orchestrator.ts'
-import { RunRecorder } from './runRecorder.ts'
+import type { FailedRunInput } from './argonOrchestrator.js'
+import { checkGeneratedTypeScript } from './generatedFiles.js'
+import { loadMockScript, MockOrchestrator } from './mockOrchestrator.js'
+import { mockScriptFromArgs, type WorldEvent } from './orchestrator.js'
+import { RunRecorder } from './runRecorder.js'
 
 const failedRun = (iteration: number): FailedRunInput => ({
   videoBytes: new Uint8Array(),

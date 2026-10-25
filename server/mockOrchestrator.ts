@@ -1,8 +1,8 @@
 import { readFile, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
-import type { FailedRunInput, GeneratedPatch } from './argonOrchestrator.ts'
-import { validateGeneratedFiles, type GeneratedFile } from './generatedFiles.ts'
-import type { TwistInput, ValidateFiles, WorldEvent, WorldOrchestrator } from './orchestrator.ts'
+import type { FailedRunInput, GeneratedPatch } from './argonOrchestrator.js'
+import { validateGeneratedFiles, type GeneratedFile } from './generatedFiles.js'
+import type { TwistInput, ValidateFiles, WorldEvent, WorldOrchestrator } from './orchestrator.js'
 
 export interface MockStep {
   files: GeneratedFile[]

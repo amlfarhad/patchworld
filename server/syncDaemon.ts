@@ -4,11 +4,11 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promise
 import { createServer } from 'node:http'
 import { basename, resolve, sep } from 'node:path'
 import { WebSocketServer, type RawData, type WebSocket } from 'ws'
-import { decodePlaytestPacket, type FileChange, type IterationEntry, type WriteFilesMessage } from '../src/shared/protocol.ts'
-import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from './generatedFiles.ts'
-import type { GeneratedPatch } from './argonOrchestrator.ts'
-import { createWorldOrchestrator, mockScriptFromArgs, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.ts'
-import { RunRecorder, type RecordedStep } from './runRecorder.ts'
+import { decodePlaytestPacket, type FileChange, type IterationEntry, type WriteFilesMessage } from '../src/shared/protocol.js'
+import { checkGeneratedTypeScript, validateGeneratedFiles, type GeneratedFile } from './generatedFiles.js'
+import type { GeneratedPatch } from './argonOrchestrator.js'
+import { createWorldOrchestrator, mockScriptFromArgs, type ValidateFiles, type WorldEvent, type WorldOrchestrator } from './orchestrator.js'
+import { RunRecorder, type RecordedStep } from './runRecorder.js'
 
 type ClientRole = 'browser' | 'agent'
 

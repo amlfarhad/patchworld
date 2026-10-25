@@ -33,3 +33,5 @@ src/generated/*.tmp
 *.njsproj
 *.sln
 *.sw?
+
+.vercel
