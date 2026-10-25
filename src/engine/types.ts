@@ -37,7 +37,7 @@ export interface MountedLevel {
   stepHumanAndRules: (frameIndex: number, elapsedSeconds: number) => StepResult
   controls: ControlBinding[]
   goal: LevelGoal
-  onPointerOrKey?: (event: { type: string; key?: string; ndc?: [number, number] }) => void
+  onPointerOrKey?: (event: { type: string; key?: string; code?: string; ndc?: [number, number] }) => void
 }
 
 export interface StepResult {

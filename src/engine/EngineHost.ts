@@ -137,7 +137,7 @@ export class EngineHost {
     this.autonomousLoop.onLevelMounted()
   }
 
-  dispatchPointerOrKey(event: { type: string; key?: string; ndc?: [number, number] }): void {
+  dispatchPointerOrKey(event: { type: string; key?: string; code?: string; ndc?: [number, number] }): void {
     if (this.autonomousLoop.isHumanControlled) this.levelHandle?.onPointerOrKey?.(event)
   }
 
