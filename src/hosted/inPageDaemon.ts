@@ -140,13 +140,14 @@ class InPageDaemon {
   /** Compiles a patch, records it, and mounts it; the engine reports the mount back as level-mounted. */
   private async applyPatch(patch: HostedPatch, epoch: number): Promise<void> {
     if (epoch !== this.goalEpoch) return
-    const module = await loadGeneratedLevel(patch.files)
-    if (epoch !== this.goalEpoch) return
     const before = new Map(this.currentFiles.map((file) => [file.path, file.content]))
     const changes: FileChange[] = patch.files.map((file) => ({ path: file.path, before: before.get(file.path) ?? null, after: file.content }))
     const merged = new Map(this.currentFiles.map((file) => [file.path, file.content]))
     patch.files.forEach((file) => merged.set(file.path, file.content))
-    this.currentFiles = [...merged].map(([path, content]) => ({ path, content }))
+    const nextFiles = [...merged].map(([path, content]) => ({ path, content }))
+    const module = await loadGeneratedLevel(nextFiles)
+    if (epoch !== this.goalEpoch) return
+    this.currentFiles = nextFiles
     this.iteration += 1
     // A demo patch replaces the level Gemini last saw, so the next live call starts a fresh conversation.
     this.previousInteractionId = patch.interactionId.startsWith('demo-') ? undefined : patch.interactionId

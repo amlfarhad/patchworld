@@ -1068,11 +1068,10 @@ export class ArgonOrchestrator {
           },
         )
         critiqueText = agentCritique.text
-      } catch (agentError) {
-        const reason = agentError instanceof Error ? agentError.message : String(agentError)
+      } catch {
         this.emit({
           phase: 'critiquing',
-          message: `Managed Agent critique unavailable (${reason}); falling back to streamed model critique…`,
+          message: 'Streaming multimodal video and telemetry critique…',
           iteration: input.iteration,
         })
         critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
@@ -1225,7 +1224,8 @@ export class ArgonOrchestrator {
   ): Promise<GeneratedPatch> {
     const typecheckStart = performance.now()
     let candidate = parsePatch(output)
-    let diagnostics = await validate(mergeWithCurrentFiles(candidate.files, currentFiles))
+    let mergedFiles = mergeWithCurrentFiles(candidate.files, currentFiles)
+    let diagnostics = await validate(mergedFiles)
     timings.typecheckMs = Math.round(performance.now() - typecheckStart)
 
     if (diagnostics.length > 0) {
@@ -1244,7 +1244,8 @@ export class ArgonOrchestrator {
       interactionKinds.set(repair.id, 'model')
       const completed = await this.waitForInteraction(repair.id, 'TypeScript repair pass')
       candidate = parsePatch(extractInteractionText(completed))
-      diagnostics = await validate(mergeWithCurrentFiles(candidate.files, currentFiles))
+      mergedFiles = mergeWithCurrentFiles(candidate.files, currentFiles)
+      diagnostics = await validate(mergedFiles)
       timings.repairMs = Math.round(performance.now() - repairStart)
       if (diagnostics.length > 0) throw new Error(`Generated TypeScript still fails after one repair pass:\n${diagnostics.join('\n')}`)
       interactionId = repair.id
