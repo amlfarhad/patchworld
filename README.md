@@ -9,8 +9,8 @@ The whole screen is one Three.js + Rapier physics canvas. Levels hot-swap into i
 1. **Generate.** Gemini writes the level as a TypeScript module (geometry, physics bodies, the bot's plan, the win rule). It's typechecked before it touches the screen.
 2. **Playtest.** The bot gets up to 8 seconds. The canvas is recorded to video, with physics telemetry alongside it.
 3. **Critique.** On a failure, the video goes back to Gemini. The critic's notes stream into the corner card, citing timestamps you can click to scrub the replay ("At 0:05 the boulder flies over the bridge…").
-4. **Patch.** Gemini edits the level code and the new version hot-swaps in. The bot tries again, up to four times.
-5. **Play.** Once the bot wins, take over: right-drag to orbit, the level's own keys to play, and a twist box to change the world ("make the cup slide back and forth"). Twists edit the current level rather than starting over.
+4. **Patch.** Gemini edits the level code and the new version hot-swaps in. The bot tries again, up to eight times. Every attempt stays in one Gemini conversation, so each critique compares the new run with all the earlier ones; the replay card shows how much context Gemini is holding.
+5. **Play.** Once the bot wins, take over: right-drag to orbit, the level's own keys to play, and a box to either twist the world ("make the cup slide back and forth") or describe a brand-new one. Twists edit the current level rather than starting over.
 
 The Workshop drawer (bottom left) shows the live log, a code diff for every iteration, the history of attempts with their replays, and the lessons the critic has learned so far.
 
@@ -51,7 +51,7 @@ All optional, in `.env`:
 | `ARGON_MODEL` | `gemini-4-argon` | Model for every call |
 | `ARGON_WORLD_THINKING` | `medium` | Thinking effort for the first world |
 | `ARGON_PATCH_THINKING` / `ARGON_CRITIQUE_THINKING` | `low` | Thinking effort for patches and critiques |
-| `ARGON_MAX_ITERATIONS` | `4` | Attempts before the loop stops |
+| `ARGON_MAX_ITERATIONS` | `8` | Attempts before the loop stops |
 | `ARGON_MOCK` | off | `1` or a fixture or run folder: replay instead of calling Gemini |
 | `ARGON_SYNC_PORT` / `VITE_ARGON_SYNC_URL` | `4174` | Move the local sync daemon off its default port |
 

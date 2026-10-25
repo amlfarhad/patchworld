@@ -51,6 +51,19 @@ function asFiles(value: unknown): GeneratedFile[] {
 
 const text = (value: unknown, max: number) => (typeof value === 'string' ? value.slice(0, max) : '')
 const optionalText = (value: unknown, max: number) => (typeof value === 'string' && value ? value.slice(0, max) : undefined)
+/** Only ids Gemini issued can continue a conversation. Demo replays use their own (demo-N), and Gemini rejects them with a 400. */
+const geminiInteractionId = (value: unknown) => {
+  const id = optionalText(value, 200)
+  return id && !/^(demo|mock)-/.test(id) ? id : undefined
+}
+
+/** Lets the page open in live mode only when this deployment can serve it. */
+export function GET(): Response {
+  return Response.json(
+    { live: Boolean(process.env.GEMINI_API_KEY), passcodeRequired: Boolean(process.env.PATCHWORLD_PASSCODE) },
+    { headers: { 'cache-control': 'no-store' } },
+  )
+}
 
 export async function POST(request: Request): Promise<Response> {
   if (!process.env.GEMINI_API_KEY) {
@@ -76,7 +89,7 @@ export async function POST(request: Request): Promise<Response> {
         let patch: GeneratedPatch
         const iteration = Number(body.iteration) || 0
         const currentFiles = asFiles(body.currentFiles)
-        const previousInteractionId = optionalText(body.previousInteractionId, 200)
+        const previousInteractionId = geminiInteractionId(body.previousInteractionId)
         switch (body.action) {
           case 'generate': {
             const goal = text(body.goal, 2_000).trim()

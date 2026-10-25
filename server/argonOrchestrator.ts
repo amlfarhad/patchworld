@@ -30,6 +30,8 @@ export type OrchestratorEvent = {
   diagnosis?: string
   skillContent?: string
   terminal?: string
+  /** Sent with phase 'context': tokens Gemini read for the last call, i.e. the whole conversation so far. */
+  contextTokens?: number
 }
 
 export interface GeneratedPatch {
@@ -154,7 +156,7 @@ export class ArgonOrchestrator implements WorldOrchestrator {
     const telemetry = compactTelemetry(input.metadata.telemetry)
     const critiquePrompt = `You are reviewing an autonomous playtest of a generated physics level. The attached video is the bot's attempt; the telemetry below was recorded alongside it.
 Failure reported by the level: ${input.metadata.failureReason ?? 'Goal not reached before the time limit'}
-Telemetry (${input.metadata.frameCount} recorded frames, positions in metres, compacted):
+${input.iteration > 1 ? `This is attempt ${input.iteration}. Every earlier attempt of this level is already in this conversation: its video, telemetry, code and your critique. Compare this run with them, say what changed, and do not repeat a fix that already failed.\n` : ''}Telemetry (${input.metadata.frameCount} recorded frames, positions in metres, compacted):
 ${JSON.stringify(telemetry)}
 Current level code:
 ${formatFiles(input.currentFiles)}
@@ -316,6 +318,10 @@ ${levelContract}`,
         const status = (event.interaction as { status?: string }).status
         if (event.event_type === 'interaction.completed' && status && status !== 'completed') {
           throw new Error(`${options.label} ended with status ${status}`)
+        }
+        const contextTokens = (event.interaction as { usage?: { total_input_tokens?: number } }).usage?.total_input_tokens
+        if (event.event_type === 'interaction.completed' && contextTokens) {
+          this.emit({ phase: 'context', message: `${options.label}: Gemini read ${contextTokens.toLocaleString('en-US')} tokens of context`, contextTokens })
         }
       } else if (event.event_type === 'step.delta') {
         if (event.delta.type === 'text') {

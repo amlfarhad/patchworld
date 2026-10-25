@@ -20,12 +20,14 @@ export interface SandboxState {
   mock: boolean;
   /** Set when a person playing the level reaches its goal. */
   humanWon: boolean;
+  /** Tokens Gemini read on its latest call: the whole conversation for this goal, every earlier attempt included. */
+  contextTokens: number;
 }
 const initial: SandboxState = {
   connected: false, ready: false, hasLevel: false, phase: 'idle', message: 'Ready for your first world',
   frame: 0, frameLimit: 240, bodyCount: 0, iteration: 0, diagnosis: '', diagnosisTime: '', logs: [],
   replays: [], replay: null, critique: '', critiqueFinal: false, history: [], patches: [],
-  skillContent: '', skillUpdated: '', goal: '', error: '', human: false, mock: false, humanWon: false,
+  skillContent: '', skillUpdated: '', goal: '', error: '', human: false, mock: false, humanWon: false, contextTokens: 0,
 }
 const maxReplays = 12
 
@@ -53,7 +55,12 @@ export function useSandbox() {
     })
     listen<{ hasLevel: boolean; bodyCount: number }>('argon:level-mounted', (detail) => setState((s) => ({ ...s, ...detail, ready: true, humanWon: false, ...(detail.hasLevel ? {} : { human: false, phase: 'idle', frame: 0 }) })))
     listen<{ frame: number; total: number; bodyCount: number }>('argon:frame', (d) => setState((s) => ({ ...s, phase: 'running', frame: d.frame, frameLimit: d.total, bodyCount: d.bodyCount })))
-    listen<{ phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }>('argon:progress', (d) => {
+    listen<{ phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string; contextTokens?: number }>('argon:progress', (d) => {
+      // Context size updates ride along without changing what the loop is doing.
+      if (d.phase === 'context') {
+        setState((s) => ({ ...s, contextTokens: d.contextTokens ?? s.contextTokens, logs: log(s, d.message, 'activity', d.timestamp) }))
+        return
+      }
       setState((s) => ({
         ...s, phase: d.terminal ? s.phase : d.skillContent ? (s.phase === 'idle' ? 'idle' : 'skill-evolving') : d.phase === 'hmr-swapped' && !s.hasLevel ? 'idle' : d.phase === 'thinking' && s.phase === 'critiquing' ? s.phase : d.phase,
         message: d.message, iteration: d.iteration ?? s.iteration, maxIterations: d.maxIterations ?? s.maxIterations,
@@ -96,7 +103,7 @@ export function useSandbox() {
       return {
         ...s, goal: keep ? s.goal : goal, error: '', phase: 'synthesizing', human: false, humanWon: false,
         diagnosis: '', diagnosisTime: '', critique: '', critiqueFinal: false, iteration: 0, frame: 0,
-        ...(keep ? {} : { replays: [], replay: null, patches: [], history: [] }),
+        ...(keep ? {} : { replays: [], replay: null, patches: [], history: [], contextTokens: 0 }),
       }
     }))
     listen<string>('argon:goal-error', (error) => setState((s) => ({ ...s, error, phase: 'error', logs: log(s, error, 'error') })))

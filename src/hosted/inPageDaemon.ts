@@ -10,9 +10,29 @@ import { DemoOrchestrator, LiveOrchestrator, type HostedEvent, type HostedOrches
  * compiled and mounted directly instead of being written to disk for Vite to hot-reload.
  */
 
-const maxIterations = 4
+/** Attempts per goal. Each critique continues the same Gemini conversation, so later attempts see every earlier one. */
+const maxIterations = 8
 const mountTimeoutMs = 15_000
 const passcodeKey = 'patchworld.livePasscode'
+const modeKey = 'patchworld.mode'
+
+export type HostedMode = 'live' | 'demo'
+let memoryMode: HostedMode | null = null
+
+/** Live is the default; Demo is an explicit choice that replays the recorded catapult run. */
+export function getHostedMode(): HostedMode {
+  try {
+    return localStorage.getItem(modeKey) === 'demo' ? 'demo' : 'live'
+  } catch {
+    return memoryMode ?? 'live'
+  }
+}
+
+export function setHostedMode(mode: HostedMode): void {
+  memoryMode = mode
+  try { localStorage.setItem(modeKey, mode) } catch { /* storage unavailable; the choice lasts for this page only */ }
+  window.dispatchEvent(new CustomEvent('patchworld:mode-changed'))
+}
 
 type Mounter = (module: GeneratedLevelModule) => Promise<void>
 let mounter: Mounter | null = null
@@ -54,12 +74,17 @@ class InPageDaemon {
   }
 
   get mock(): boolean {
-    return !getLivePasscode()
+    return getHostedMode() === 'demo'
   }
 
   private orchestrator(): HostedOrchestrator {
-    const passcode = getLivePasscode()
-    return passcode ? new LiveOrchestrator(passcode) : this.demo
+    return this.mock ? this.demo : new LiveOrchestrator(getLivePasscode())
+  }
+
+  /** The conversation to continue. A demo replay's id (demo-N) is never sent to Gemini, which rejects it. */
+  private chainId(): string | undefined {
+    const id = this.previousInteractionId
+    return !this.mock && id?.startsWith('demo-') ? undefined : id
   }
 
   private readonly demo = new DemoOrchestrator()
@@ -181,7 +206,7 @@ class InPageDaemon {
     this.worldGoal = this.activeGoal
     this.deliver({ type: 'start-goal-accepted', goal: this.activeGoal })
     try {
-      const patch = await this.orchestrator().revise({ goal: baseGoal, twist: text, currentFiles: this.currentFiles, previousInteractionId: this.previousInteractionId }, this.emitter(epoch), this.controller.signal)
+      const patch = await this.orchestrator().revise({ goal: baseGoal, twist: text, currentFiles: this.currentFiles, previousInteractionId: this.chainId() }, this.emitter(epoch), this.controller.signal)
       await this.applyPatch(patch, epoch)
     } catch (error) {
       this.fail(error, epoch)
@@ -205,7 +230,7 @@ class InPageDaemon {
         videoBytes: packet.videoBytes,
         metadata: packet.metadata,
         currentFiles: this.currentFiles,
-        previousInteractionId: this.previousInteractionId,
+        previousInteractionId: this.chainId(),
         iteration: this.iteration,
       }, this.emitter(epoch), this.controller.signal)
       if (epoch !== this.goalEpoch) return
@@ -232,7 +257,7 @@ class InPageDaemon {
     }
     try {
       this.progress({ phase: 'critiquing', message: 'The level crashed while loading; asking for a repair.', iteration: this.iteration })
-      const patch = await this.orchestrator().repair({ error, stack, currentFiles: this.currentFiles, previousInteractionId: this.previousInteractionId, iteration: this.iteration }, this.emitter(epoch), this.controller.signal)
+      const patch = await this.orchestrator().repair({ error, stack, currentFiles: this.currentFiles, previousInteractionId: this.chainId(), iteration: this.iteration }, this.emitter(epoch), this.controller.signal)
       await this.applyPatch(patch, epoch)
     } catch (repairError) {
       this.fail(repairError, epoch)

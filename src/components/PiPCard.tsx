@@ -13,6 +13,8 @@ function CritiqueText({ text, onSeek }: { text: string; onSeek: (seconds: number
   })}</>
 }
 
+const formatTokens = (tokens: number) => (tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 100_000 ? 0 : 1)}K` : String(tokens))
+
 export function PiPCard({ state }: { state: SandboxState }) {
   const [open, setOpen] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -36,6 +38,7 @@ export function PiPCard({ state }: { state: SandboxState }) {
     </button>
     {open && <div id="replay-content">
       {replay ? <div className="replay-video-wrap"><video ref={videoRef} key={replay.runId} src={replay.videoUrl} autoPlay loop controls muted playsInline aria-label="Recorded bot attempt" /><span className={`replay-result ${replay.failed ? '' : 'passed'}`}>{replay.failed ? <ScanLine size={11} /> : <CircleCheck size={11} />}{replay.failed ? 'FAILED ATTEMPT' : 'GOAL REACHED'}</span></div> : <div className="replay-empty"><ScanLine size={27} strokeWidth={1} /><span>No attempts recorded yet.</span><small>The next bot run will appear here.</small></div>}
+      {state.contextTokens > 0 && <div className="context-meter micro-label" title="Every attempt's video, telemetry, code and critique stay in one Gemini conversation, so each critique can compare against all of them.">GEMINI CONTEXT <b>{formatTokens(state.contextTokens)}</b> TOKENS · <b>{state.replays.length}</b> {state.replays.length === 1 ? 'ATTEMPT' : 'ATTEMPTS'} REMEMBERED</div>}
       <div className="critique-block"><div className="flex items-center justify-between"><span className="micro-label flex items-center gap-2"><MessageSquareText size={12} /> {streaming ? 'CRITIC IS WRITING' : won ? 'LEVEL BEATEN' : 'CRITIC NOTES'}</span><span className="micro-label opacity-50">{state.diagnosisTime ? new Date(state.diagnosisTime).toLocaleTimeString([], { hour12: false }) : '—'}</span></div><p aria-live="polite"><CritiqueText text={notes} onSeek={seek} />{streaming && <span className="stream-caret" aria-hidden="true" />}</p></div>
     </div>}
   </aside>

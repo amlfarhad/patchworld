@@ -172,3 +172,15 @@ input { min-width: 0; outline: none; }
 .mode-form button { font: 13px var(--font-pixel); padding: 4px 10px; border: 2px solid var(--ink); border-radius: 3px; background: #f0c95f; color: var(--ink); }
 .mode-form button:disabled { opacity: .5; }
 .mode-back { align-self: flex-start; font: 9px var(--font-mono); background: none; border: 0; padding: 0; color: #6d58a8; text-decoration: underline; cursor: pointer; }
+
+/* Current goal in the header, so a submitted prompt stays visible. */
+.header-goal { display: inline-block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; text-transform: uppercase; }
+/* Twist the current world, or start a new one, from the player bar. */
+.twist-modes { display: flex; gap: 3px; padding: 2px; border: 1px solid #d0c6dc; border-radius: 4px; background: #f3edf7; flex-shrink: 0; }
+.twist-form .twist-modes button { width: auto; height: auto; padding: 5px 7px; border: 0; border-radius: 3px; background: transparent; color: #9d90ad; font: 8px var(--font-mono); white-space: nowrap; }
+.twist-form .twist-modes button[aria-checked='true'] { background: #eaddf2; color: #6e549a; box-shadow: inset 0 0 0 1px #ac97c4; }
+.twist-form .twist-modes button:focus-visible { outline: 2px solid #7265bd; outline-offset: 1px; }
+/* How much of the run Gemini is holding in one conversation. */
+.context-meter { padding: 9px 14px 0; font-size: 8px; color: #7c7968; letter-spacing: .04em; }
+.context-meter b { color: #4f6b55; font-weight: 600; }
+@media (max-width: 720px) { .twist-form .twist-modes button { padding: 4px 5px; font-size: 7px; } }
