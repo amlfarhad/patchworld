@@ -1,0 +1,12 @@
+{
+  "goal": "Build a gravity slingshot puzzle where a small sphere orbits a massive sphere and escapes through a target ring.",
+  "notes": "Recorded from a live Gemini run (2026-10-25). Quick-start presets replay it instantly instead of building live.",
+  "steps": [
+    {
+      "files": {
+        "src/generated/activeLevel.ts": "cached-orbital-01-activeLevel.level"
+      },
+      "diagnosis": "Fixed TS1484 verbatimModuleSyntax error by using `import type` for `ControlBinding`, `LevelGoal`, `MountedLevel`, and `StepResult`."
+    }
+  ]
+}

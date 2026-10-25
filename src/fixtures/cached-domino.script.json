@@ -1,0 +1,12 @@
+{
+  "goal": "Build a cascading domino course that knocks a ball down a ramp and into a goal cup.",
+  "notes": "Recorded from a live Gemini run (2026-10-25). Quick-start presets replay it instantly instead of building live.",
+  "steps": [
+    {
+      "files": {
+        "src/generated/activeLevel.ts": "cached-domino-01-activeLevel.level"
+      },
+      "diagnosis": "Built a complete cascading domino course level with a starter platform, an interactive overhead starter gong block, 12 rainbow-colored dominoes on a descending stepped terrace, a ball launch saddle holding targetBall, a low-friction ramp with guide rails, and a goal cup with a tall containment backstop."
+    }
+  ]
+}

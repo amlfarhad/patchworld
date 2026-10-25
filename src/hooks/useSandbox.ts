@@ -96,7 +96,7 @@ export function useSandbox() {
     // Browsers get each patch's full before/after text on `patch-applied`; keep the last dozen for the Code tab.
     // The daemon sends it before counting the new attempt (0 for the first world), so the attempt this code becomes is one more.
     listen<{ iteration?: number; changes?: FileChange[] }>('argon:patch-applied', ({ iteration, changes }) => {
-      if (changes?.length) setState((s) => ({ ...s, build: advanceStage(s.build, 'patched', true), code: [...s.code.slice(-11), { iteration: (iteration ?? s.iteration) + 1, timestamp: new Date().toISOString(), changes }] }))
+      if (changes?.length) setState((s) => ({ ...s, build: advanceStage(s.build, 'patched', true), code: [...s.code.slice(-11), { iteration: iteration ?? s.iteration + 1, timestamp: new Date().toISOString(), changes }] }))
     })
     listen<string>('argon:playtest-state', (phase) => setState((s) => ({
       ...s, phase, human: phase === 'human' || phase === 'complete', frame: phase === 'running' ? 0 : s.frame, iteration: phase === 'running' ? Math.max(1, s.iteration) : s.iteration,

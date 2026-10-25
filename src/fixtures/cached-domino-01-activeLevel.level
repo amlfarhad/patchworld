@@ -1,0 +1,863 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import type { ControlBinding, LevelGoal, MountedLevel, StepResult } from '../engine/types';
+
+interface DominoEntry {
+  index: number;
+  name: string;
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+  mesh: THREE.Mesh;
+  material: THREE.MeshStandardMaterial;
+  baseX: number;
+  stepTopY: number;
+  toppled: boolean;
+}
+
+export function buildWorld(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+  eventQueue: RAPIER.EventQueue,
+): MountedLevel {
+  const createdObjects: THREE.Object3D[] = [];
+  const createdGeometries: THREE.BufferGeometry[] = [];
+  const createdMaterials: THREE.Material[] = [];
+  const createdBodies: RAPIER.RigidBody[] = [];
+
+  const trackObject = <T extends THREE.Object3D>(obj: T): T => {
+    scene.add(obj);
+    createdObjects.push(obj);
+    return obj;
+  };
+
+  const trackGeometry = <T extends THREE.BufferGeometry>(geo: T): T => {
+    createdGeometries.push(geo);
+    return geo;
+  };
+
+  const trackMaterial = <T extends THREE.Material>(mat: T): T => {
+    createdMaterials.push(mat);
+    return mat;
+  };
+
+  const trackBody = (name: string | null, body: RAPIER.RigidBody): RAPIER.RigidBody => {
+    createdBodies.push(body);
+    if (name) {
+      namedBodies.set(name, body);
+    }
+    return body;
+  };
+
+  const createStaticBox = (
+    name: string | null,
+    pos: [number, number, number],
+    halfExtents: [number, number, number],
+    color: number,
+    options?: {
+      rotZ?: number;
+      friction?: number;
+      restitution?: number;
+      opacity?: number;
+      emissive?: number;
+      emissiveIntensity?: number;
+      metalness?: number;
+      roughness?: number;
+    },
+  ): { body: RAPIER.RigidBody; collider: RAPIER.Collider; mesh: THREE.Mesh } => {
+    const [hx, hy, hz] = halfExtents;
+    const rotZ = options?.rotZ ?? 0;
+    const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rotZ);
+
+    const bodyDesc = RAPIER.RigidBodyDesc.fixed()
+      .setTranslation(pos[0], pos[1], pos[2])
+      .setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
+    const body = trackBody(name, world.createRigidBody(bodyDesc));
+
+    const colliderDesc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+      .setFriction(options?.friction ?? 0.5)
+      .setRestitution(options?.restitution ?? 0.05);
+    const collider = world.createCollider(colliderDesc, body);
+
+    const geo = trackGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2));
+    const isTransparent = (options?.opacity ?? 1) < 1;
+    const mat = trackMaterial(
+      new THREE.MeshStandardMaterial({
+        color,
+        roughness: options?.roughness ?? 0.55,
+        metalness: options?.metalness ?? 0.15,
+        transparent: isTransparent,
+        opacity: options?.opacity ?? 1,
+        emissive: options?.emissive ?? 0x000000,
+        emissiveIntensity: options?.emissiveIntensity ?? 0,
+      }),
+    );
+    const mesh = trackObject(new THREE.Mesh(geo, mat));
+    mesh.position.set(pos[0], pos[1], pos[2]);
+    mesh.quaternion.copy(quat);
+    mesh.castShadow = !isTransparent;
+    mesh.receiveShadow = true;
+
+    return { body, collider, mesh };
+  };
+
+  // 1. Starter Platform (top surface at y = 4.20, x = -13.0 to -6.45, z = -3.4 to 3.4)
+  createStaticBox('starterPlatform', [-9.725, 2.1, 0], [3.275, 2.1, 3.4], 0x334155, {
+    friction: 0.6,
+    roughness: 0.65,
+  });
+
+  // Trim stripe on starter platform leading to first domino
+  createStaticBox(null, [-9.5, 4.205, 0], [2.9, 0.01, 0.55], 0x38bdf8, {
+    friction: 0.4,
+    emissive: 0x0284c7,
+    emissiveIntensity: 0.25,
+  });
+
+  // Safety perimeter curbs on Starter Platform so player never falls off
+  createStaticBox(null, [-12.9, 4.75, 0], [0.15, 0.55, 3.4], 0x475569, { friction: 0.1 });
+  createStaticBox(null, [-9.725, 4.75, -3.3], [3.275, 0.55, 0.15], 0x475569, { friction: 0.1 });
+  createStaticBox(null, [-9.725, 4.75, 3.3], [3.275, 0.55, 0.15], 0x475569, { friction: 0.1 });
+
+  // Low bumper at x = -6.42 on the floor that stops the player from walking into the domino steps,
+  // while allowing the player sphere (radius 0.58) at x = -6.45 to hit domino_0 (at x = -6.00) squarely!
+  createStaticBox(null, [-6.45, 4.32, -2.05], [0.12, 0.45, 1.15], 0x475569, { friction: 0.1 });
+
+  // Side Catwalk along +Z (z = 1.15 to 3.35) connecting Starter Platform down to Goal Cup
+  const catwalkDx = 15.2 - -6.45;
+  const catwalkDy = 0.35 - 4.2;
+  const catwalkLen = Math.hypot(catwalkDx, catwalkDy);
+  const catwalkAngle = Math.atan2(catwalkDy, catwalkDx);
+  const catwalkNormalX = -Math.sin(catwalkAngle);
+  const catwalkNormalY = Math.cos(catwalkAngle);
+  createStaticBox(
+    'sideCatwalk',
+    [
+      (-6.45 + 15.2) * 0.5 - 0.18 * catwalkNormalX,
+      (4.2 + 0.35) * 0.5 - 0.18 * catwalkNormalY,
+      2.25,
+    ],
+    [catwalkLen * 0.5, 0.18, 1.05],
+    0x3b495e,
+    { rotZ: catwalkAngle, friction: 0.55 },
+  );
+  // Outer guardrail along the catwalk
+  createStaticBox(
+    null,
+    [
+      (-6.45 + 15.2) * 0.5 + 0.45 * catwalkNormalX,
+      (4.2 + 0.35) * 0.5 + 0.45 * catwalkNormalY,
+      3.25,
+    ],
+    [catwalkLen * 0.5, 0.45, 0.12],
+    0x64748b,
+    { rotZ: catwalkAngle, friction: 0.05 },
+  );
+
+  // 2. Interactive Overhead Starter Gong Block above the run-up at x = -8.9, y = 6.25, z = 0
+  const gongBaseY = 6.25;
+  const gongBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(-8.9, gongBaseY, 0);
+  const gongBody = trackBody('starterGongBlock', world.createRigidBody(gongBodyDesc));
+  const gongCollider = world.createCollider(
+    RAPIER.ColliderDesc.cuboid(0.55, 0.38, 0.55)
+      .setFriction(0.2)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    gongBody,
+  );
+  const gongGeo = trackGeometry(new THREE.BoxGeometry(1.1, 0.76, 1.1));
+  const gongMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      roughness: 0.3,
+      metalness: 0.6,
+      emissive: 0xb45309,
+      emissiveIntensity: 0.35,
+    }),
+  );
+  const gongMesh = trackObject(new THREE.Mesh(gongGeo, gongMat));
+  gongMesh.position.set(-8.9, gongBaseY, 0);
+  gongMesh.castShadow = true;
+  gongMesh.receiveShadow = true;
+
+  // 3. Stepped Domino Terrace & 12 Cascading Dominoes (domino_0 .. domino_11)
+  const numDominoes = 12;
+  const dominoSpacing = 0.80;
+  const dominoStepDrop = 0.12;
+  const dominoStartX = -6.0;
+  const dominoStartTopY = 4.20;
+  const dominoHalfX = 0.11;
+  const dominoHalfY = 1.10;
+  const dominoHalfZ = 0.64;
+
+  const dominoes: DominoEntry[] = [];
+  const handleToDomino = new Map<number, DominoEntry>();
+
+  for (let i = 0; i < numDominoes; i++) {
+    const x = dominoStartX + i * dominoSpacing;
+    const stepTopY = dominoStartTopY - i * dominoStepDrop;
+    const stepHeight = stepTopY;
+
+    // Terrace step block for domino i
+    const stepCenterX = i === numDominoes - 1 ? x + 0.1 : x - 0.12;
+    const stepHalfWidth = i === numDominoes - 1 ? 0.52 : 0.42;
+    createStaticBox(
+      null,
+      [stepCenterX, stepHeight * 0.5, 0],
+      [stepHalfWidth, stepHeight * 0.5, 0.92],
+      i % 2 === 0 ? 0x334155 : 0x3e4c63,
+      { friction: 0.65, restitution: 0.02 },
+    );
+
+    // Domino rigid body (constrained to X-Y plane and Z-axis pitch for a clean cascade)
+    const dBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, stepTopY + dominoHalfY + 0.005, 0)
+      .enabledTranslations(true, true, false)
+      .enabledRotations(false, false, true)
+      .setLinearDamping(0.15)
+      .setAngularDamping(0.12)
+      .setCcdEnabled(true);
+    const dBody = trackBody(`domino_${i}`, world.createRigidBody(dBodyDesc));
+
+    const dColliderDesc = RAPIER.ColliderDesc.cuboid(dominoHalfX, dominoHalfY, dominoHalfZ)
+      .setDensity(2.2)
+      .setFriction(0.45)
+      .setRestitution(0.15)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+    const dCollider = world.createCollider(dColliderDesc, dBody);
+
+    const hue = (i / numDominoes) * 0.78;
+    const color = new THREE.Color().setHSL(hue, 0.85, 0.56);
+    const emissiveColor = new THREE.Color().setHSL(hue, 0.9, 0.35);
+    const dMat = trackMaterial(
+      new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.32,
+        metalness: 0.18,
+        emissive: emissiveColor,
+        emissiveIntensity: 0.12,
+      }),
+    );
+    const dGeo = trackGeometry(
+      new THREE.BoxGeometry(dominoHalfX * 2, dominoHalfY * 2, dominoHalfZ * 2),
+    );
+    const dMesh = trackObject(new THREE.Mesh(dGeo, dMat));
+    dMesh.position.set(x, stepTopY + dominoHalfY + 0.005, 0);
+    dMesh.castShadow = true;
+    dMesh.receiveShadow = true;
+
+    const entry: DominoEntry = {
+      index: i,
+      name: `domino_${i}`,
+      body: dBody,
+      collider: dCollider,
+      mesh: dMesh,
+      material: dMat,
+      baseX: x,
+      stepTopY,
+      toppled: false,
+    };
+    dominoes.push(entry);
+    handleToDomino.set(dCollider.handle, entry);
+  }
+
+  // 4. Ball Launch Saddle at the top of the ramp (x = 3.30 to 4.25, top surface at y = 2.88)
+  const lastStepTopY = dominoStartTopY - (numDominoes - 1) * dominoStepDrop; // 2.88
+  createStaticBox(
+    'ballLaunchSaddle',
+    [3.78, lastStepTopY * 0.5, 0],
+    [0.48, lastStepTopY * 0.5, 0.92],
+    0x475569,
+    { friction: 0.25, restitution: 0.05 },
+  );
+
+  // 5. Sloped Ramp from (4.20, 2.88) down to (13.20, 0.85)
+  const rampP1X = 4.20;
+  const rampP1Y = 2.88;
+  const rampP2X = 13.20;
+  const rampP2Y = 0.85;
+  const rampDx = rampP2X - rampP1X;
+  const rampDy = rampP2Y - rampP1Y;
+  const rampLength = Math.hypot(rampDx, rampDy);
+  const rampAngle = Math.atan2(rampDy, rampDx);
+  const rampHalfThick = 0.16;
+  const rampNormX = -Math.sin(rampAngle);
+  const rampNormY = Math.cos(rampAngle);
+  const rampCenterX = (rampP1X + rampP2X) * 0.5 - rampHalfThick * rampNormX;
+  const rampCenterY = (rampP1Y + rampP2Y) * 0.5 - rampHalfThick * rampNormY;
+
+  createStaticBox(
+    'ramp',
+    [rampCenterX, rampCenterY, 0],
+    [rampLength * 0.5, rampHalfThick, 0.92],
+    0x0284c7,
+    {
+      rotZ: rampAngle,
+      friction: 0.08,
+      restitution: 0.02,
+      roughness: 0.35,
+      metalness: 0.25,
+      emissive: 0x0369a1,
+      emissiveIntensity: 0.18,
+    },
+  );
+
+  // Support piers beneath the ramp
+  createStaticBox(null, [6.8, 1.05, 0], [0.35, 1.05, 0.82], 0x334155);
+  createStaticBox(null, [10.4, 0.62, 0], [0.35, 0.62, 0.82], 0x334155);
+
+  // Continuous low-friction side guide rails along the domino lane & ramp (z = ±0.84)
+  createStaticBox(null, [-1.2, 3.85, -0.84], [5.45, 0.55, 0.08], 0x64748b, {
+    friction: 0.0,
+    opacity: 0.45,
+  });
+  createStaticBox(null, [-1.2, 3.85, 0.84], [5.45, 0.55, 0.08], 0x64748b, {
+    friction: 0.0,
+    opacity: 0.45,
+  });
+  createStaticBox(
+    null,
+    [rampCenterX + 0.45 * rampNormX, rampCenterY + 0.45 * rampNormY, -0.84],
+    [rampLength * 0.5, 0.42, 0.08],
+    0x38bdf8,
+    { rotZ: rampAngle, friction: 0.0, opacity: 0.45 },
+  );
+  createStaticBox(
+    null,
+    [rampCenterX + 0.45 * rampNormX, rampCenterY + 0.45 * rampNormY, 0.84],
+    [rampLength * 0.5, 0.42, 0.08],
+    0x38bdf8,
+    { rotZ: rampAngle, friction: 0.0, opacity: 0.45 },
+  );
+
+  // 6. Goal Cup at the bottom of the ramp (centered at x = 14.35, z = 0)
+  // Cup floor (top surface at y = 0.25)
+  createStaticBox('goalCup', [14.35, 0.125, 0], [1.25, 0.125, 1.15], 0x10b981, {
+    friction: 0.8,
+    restitution: 0.0,
+    emissive: 0x059669,
+    emissiveIntensity: 0.35,
+  });
+  // Glowing inner goal pad
+  createStaticBox(null, [14.35, 0.26, 0], [0.95, 0.02, 0.85], 0x34d399, {
+    friction: 0.9,
+    restitution: 0.0,
+    emissive: 0x10b981,
+    emissiveIntensity: 0.65,
+  });
+  // Near lip wall of Goal Cup at x = 13.16 (top at y = 0.76, just below ramp exit y = 0.85)
+  createStaticBox(null, [13.16, 0.38, 0], [0.1, 0.38, 1.15], 0x059669, {
+    friction: 0.4,
+    restitution: 0.0,
+  });
+  // Tall containment backstop wall on the far side of the Goal Cup at x = 15.55
+  createStaticBox('goalCupBackstop', [15.55, 1.85, 0], [0.16, 1.85, 1.15], 0x047857, {
+    friction: 0.6,
+    restitution: 0.02,
+  });
+  // Angled upper baffle hood on the backstop to funnel high-momentum impacts straight down into the cup
+  createStaticBox(null, [15.22, 2.55, 0], [0.45, 0.12, 1.12], 0x059669, {
+    rotZ: 0.62,
+    friction: 0.2,
+    restitution: 0.02,
+  });
+  // Left and right walls of Goal Cup
+  createStaticBox(null, [14.35, 1.25, -1.05], [1.25, 1.25, 0.12], 0x059669, {
+    friction: 0.2,
+    restitution: 0.02,
+    opacity: 0.65,
+  });
+  createStaticBox(null, [14.35, 1.25, 1.05], [1.25, 1.25, 0.12], 0x059669, {
+    friction: 0.2,
+    restitution: 0.02,
+    opacity: 0.65,
+  });
+
+  // 7. Target Ball perched on the Ball Launch Saddle at (4.02, 3.33, 0)
+  const ballRadius = 0.45;
+  const ballStartX = 4.02;
+  const ballStartY = lastStepTopY + ballRadius;
+  const targetBallDesc = RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(ballStartX, ballStartY, 0)
+    .enabledTranslations(true, true, false)
+    .enabledRotations(false, false, true)
+    .setLinearDamping(0.08)
+    .setAngularDamping(0.05)
+    .setCcdEnabled(true);
+  const targetBallBody = trackBody('targetBall', world.createRigidBody(targetBallDesc));
+  const targetBallCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(ballRadius)
+      .setDensity(1.8)
+      .setFriction(0.25)
+      .setRestitution(0.08)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    targetBallBody,
+  );
+  const targetBallGeo = trackGeometry(new THREE.SphereGeometry(ballRadius, 32, 24));
+  const targetBallMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xf43f5e,
+      roughness: 0.22,
+      metalness: 0.35,
+      emissive: 0xbe123c,
+      emissiveIntensity: 0.28,
+    }),
+  );
+  const targetBallMesh = trackObject(new THREE.Mesh(targetBallGeo, targetBallMat));
+  targetBallMesh.position.set(ballStartX, ballStartY, 0);
+  targetBallMesh.castShadow = true;
+  targetBallMesh.receiveShadow = true;
+
+  // 8. Player Body on the Starter Platform at (-11.6, 4.80, 0)
+  const playerRadius = 0.58;
+  const playerBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(-11.6, 4.2 + playerRadius + 0.05, 0)
+    .setLinearDamping(1.2)
+    .setAngularDamping(0.8)
+    .setCcdEnabled(true);
+  const playerBody = trackBody('player', world.createRigidBody(playerBodyDesc));
+  const playerCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(playerRadius)
+      .setDensity(2.4)
+      .setFriction(0.65)
+      .setRestitution(0.1)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    playerBody,
+  );
+  const playerGeo = trackGeometry(new THREE.SphereGeometry(playerRadius, 28, 22));
+  const playerMat = trackMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      roughness: 0.25,
+      metalness: 0.45,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.25,
+    }),
+  );
+  const playerMesh = trackObject(new THREE.Mesh(playerGeo, playerMat));
+  playerMesh.position.set(-11.6, 4.2 + playerRadius + 0.05, 0);
+  playerMesh.castShadow = true;
+  playerMesh.receiveShadow = true;
+
+  // Controls & Input State
+  const controls: ControlBinding[] = [
+    { key: 'KeyW', action: 'Move North (-Z)' },
+    { key: 'KeyS', action: 'Move South (+Z)' },
+    { key: 'KeyA', action: 'Move West (-X)' },
+    { key: 'KeyD', action: 'Move East (+X)' },
+    { key: 'ArrowUp', action: 'Move North (-Z)' },
+    { key: 'ArrowDown', action: 'Move South (+Z)' },
+    { key: 'ArrowLeft', action: 'Move West (-X)' },
+    { key: 'ArrowRight', action: 'Move East (+X)' },
+    { key: 'Space', action: 'Jump' },
+    { key: 'KeyF', action: 'Strike / Push Impulse' },
+  ];
+
+  const goal: LevelGoal = {
+    type: 'in-region',
+    body: 'targetBall',
+    min: [13.2, 0.2, -1.1],
+    max: [15.5, 1.5, 1.1],
+  };
+
+  const pressedKeys = new Set<string>();
+  let jumpQueued = false;
+  let strikeQueued = false;
+  let lastStrikeTime = -10;
+  let gongTriggered = false;
+  let gongTriggerTime = 0;
+  let ballKnocked = false;
+
+  const normalizeCode = (event: { key?: string; code?: string }): string => {
+    if (event.code) return event.code;
+    const k = event.key ?? '';
+    if (k === 'w' || k === 'W') return 'KeyW';
+    if (k === 's' || k === 'S') return 'KeyS';
+    if (k === 'a' || k === 'A') return 'KeyA';
+    if (k === 'd' || k === 'D') return 'KeyD';
+    if (k === 'f' || k === 'F') return 'KeyF';
+    if (k === ' ') return 'Space';
+    return k;
+  };
+
+  const onPointerOrKey = (event: {
+    type: string;
+    key?: string;
+    code?: string;
+    ndc?: [number, number];
+  }): void => {
+    const code = normalizeCode(event);
+    if (event.type === 'keydown') {
+      pressedKeys.add(code);
+      if (code === 'Space') jumpQueued = true;
+      if (code === 'KeyF') strikeQueued = true;
+    } else if (event.type === 'keyup') {
+      pressedKeys.delete(code);
+    } else if (event.type === 'pointerdown') {
+      strikeQueued = true;
+    }
+  };
+
+  const isPlayerGrounded = (): boolean => {
+    const pos = playerBody.translation();
+    const vel = playerBody.linvel();
+    if (Math.abs(vel.y) > 2.2) return false;
+    if (pos.x <= -6.2 && pos.y <= 4.2 + playerRadius + 0.22 && pos.y >= 4.0) return true;
+    if (pos.z >= 1.0 && pos.y <= 4.3 + playerRadius + 0.25) return true;
+    if (pos.y <= playerRadius + 0.22) return true;
+    return false;
+  };
+
+  const triggerDominoTopple = (entry: DominoEntry): void => {
+    if (entry.toppled) return;
+    entry.toppled = true;
+    entry.material.emissiveIntensity = 0.55;
+    entry.body.wakeUp();
+    entry.body.setAngvel({ x: 0, y: 0, z: -5.4 }, true);
+    const curVel = entry.body.linvel();
+    entry.body.setLinvel({ x: Math.max(curVel.x, 1.9), y: Math.min(curVel.y, -0.25), z: 0 }, true);
+  };
+
+  const triggerBallKnock = (): void => {
+    if (ballKnocked) return;
+    ballKnocked = true;
+    targetBallMat.emissiveIntensity = 0.6;
+    targetBallBody.wakeUp();
+    targetBallBody.setLinvel({ x: 6.4, y: -0.6, z: 0 }, true);
+    targetBallBody.setAngvel({ x: 0, y: 0, z: -13.5 }, true);
+  };
+
+  const getDominoTiltForward = (entry: DominoEntry): number => {
+    const q = entry.body.rotation();
+    const euler = new THREE.Euler().setFromQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w));
+    return -euler.z;
+  };
+
+  const handleCollisionPair = (h1: number, h2: number): void => {
+    const pHandle = playerCollider.handle;
+    const gHandle = gongCollider.handle;
+    const bHandle = targetBallCollider.handle;
+
+    // Player hitting Starter Gong from below
+    if ((h1 === pHandle && h2 === gHandle) || (h2 === pHandle && h1 === gHandle)) {
+      const pPos = playerBody.translation();
+      const gPos = gongBody.translation();
+      const pVel = playerBody.linvel();
+      if (!gongTriggered && pPos.y < gPos.y - 0.2 && pVel.y > -0.5) {
+        gongTriggered = true;
+        gongMat.color.setHex(0x10b981);
+        gongMat.emissive.setHex(0x059669);
+        gongMat.emissiveIntensity = 0.7;
+        playerBody.setLinvel({ x: Math.max(pVel.x, 5.5), y: -1.5, z: pVel.z }, true);
+      }
+    }
+
+    // Player hitting domino_0 from -X side
+    const d0 = dominoes[0];
+    if ((h1 === pHandle && h2 === d0.collider.handle) || (h2 === pHandle && h1 === d0.collider.handle)) {
+      const pPos = playerBody.translation();
+      const dPos = d0.body.translation();
+      if (pPos.x < dPos.x + 0.1) {
+        triggerDominoTopple(d0);
+      }
+    }
+
+    // Domino i hitting Domino i+1
+    const domA = handleToDomino.get(h1);
+    const domB = handleToDomino.get(h2);
+    if (domA && domB) {
+      const earlier = domA.index < domB.index ? domA : domB;
+      const later = domA.index < domB.index ? domB : domA;
+      if (later.index === earlier.index + 1 && (earlier.toppled || getDominoTiltForward(earlier) > 0.12)) {
+        triggerDominoTopple(later);
+      }
+    }
+
+    // Last domino hitting targetBall
+    const lastDom = dominoes[numDominoes - 1];
+    if (
+      (h1 === lastDom.collider.handle && h2 === bHandle) ||
+      (h2 === lastDom.collider.handle && h1 === bHandle)
+    ) {
+      if (lastDom.toppled || getDominoTiltForward(lastDom) > 0.18) {
+        triggerBallKnock();
+      }
+    }
+  };
+
+  const checkGoalReached = (): boolean => {
+    const pos = targetBallBody.translation();
+    return (
+      pos.x >= goal.min[0] &&
+      pos.x <= goal.max[0] &&
+      pos.y >= goal.min[1] &&
+      pos.y <= goal.max[1] &&
+      pos.z >= goal.min[2] &&
+      pos.z <= goal.max[2]
+    );
+  };
+
+  const updateSharedPhysicsAndVisuals = (elapsedSeconds: number): void => {
+    // 1. Drain Rapier collision events
+    eventQueue.drainCollisionEvents((h1, h2, started) => {
+      if (started) {
+        handleCollisionPair(h1, h2);
+      }
+    });
+
+    // 2. Check narrow-phase contact manifolds for active contacts
+    const pPos = playerBody.translation();
+    const pVel = playerBody.linvel();
+    const gPos = gongBody.translation();
+    if (
+      !gongTriggered &&
+      Math.abs(pPos.x - gPos.x) < 0.95 &&
+      Math.abs(pPos.z - gPos.z) < 0.95 &&
+      pPos.y + playerRadius >= gPos.y - 0.42 &&
+      pPos.y < gPos.y - 0.15 &&
+      pVel.y > 0.1
+    ) {
+      gongTriggered = true;
+      gongTriggerTime = elapsedSeconds;
+      gongMat.color.setHex(0x10b981);
+      gongMat.emissive.setHex(0x059669);
+      gongMat.emissiveIntensity = 0.7;
+      playerBody.setLinvel({ x: Math.max(pVel.x, 5.5), y: -1.5, z: pVel.z }, true);
+    }
+
+    if (gongTriggered) {
+      const dt = Math.max(0, elapsedSeconds - gongTriggerTime);
+      const bounce = Math.exp(-dt * 4) * Math.sin(dt * 16) * 0.18;
+      gongBody.setNextKinematicTranslation({ x: -8.9, y: gongBaseY + 0.22 + bounce, z: 0 });
+    }
+
+    // Check narrow-phase contact between player and domino_0
+    world.contactPair(playerCollider, dominoes[0].collider, () => {
+      if (pPos.x < dominoes[0].body.translation().x + 0.1) {
+        triggerDominoTopple(dominoes[0]);
+      }
+    });
+
+    // Check narrow-phase contact and physical topple propagation along the domino chain
+    for (let i = 0; i < numDominoes - 1; i++) {
+      const curr = dominoes[i];
+      const next = dominoes[i + 1];
+      const tilt = getDominoTiltForward(curr);
+      if (tilt > 0.18 && !curr.toppled) {
+        curr.toppled = true;
+        curr.material.emissiveIntensity = 0.55;
+      }
+      if (curr.toppled && !next.toppled) {
+        world.contactPair(curr.collider, next.collider, () => {
+          triggerDominoTopple(next);
+        });
+        // When curr has tilted past contact angle (0.29 rad) and its upper tip physically reaches next
+        if (tilt >= 0.29) {
+          const currPos = curr.body.translation();
+          const nextPos = next.body.translation();
+          const tipX = currPos.x + Math.sin(tilt) * dominoHalfY + dominoHalfX;
+          if (tipX >= nextPos.x - dominoHalfX - 0.04) {
+            triggerDominoTopple(next);
+          }
+        }
+      }
+    }
+
+    // Check contact between last domino and targetBall
+    const lastDom = dominoes[numDominoes - 1];
+    const lastTilt = getDominoTiltForward(lastDom);
+    if (lastDom.toppled && !ballKnocked) {
+      world.contactPair(lastDom.collider, targetBallCollider, () => {
+        triggerBallKnock();
+      });
+      if (lastTilt >= 0.36) {
+        const lastPos = lastDom.body.translation();
+        const bPos = targetBallBody.translation();
+        const tipX = lastPos.x + Math.sin(lastTilt) * dominoHalfY + dominoHalfX;
+        if (tipX >= bPos.x - ballRadius - 0.05) {
+          triggerBallKnock();
+        }
+      }
+    }
+
+    // Keep targetBall stationary on launch saddle prior to domino impact
+    if (!ballKnocked) {
+      targetBallBody.setLinvel({ x: 0, y: 0, z: 0 }, false);
+      targetBallBody.setAngvel({ x: 0, y: 0, z: 0 }, false);
+    } else {
+      const bPos = targetBallBody.translation();
+      const bVel = targetBallBody.linvel();
+      // Ensure smooth downward roll while on the ramp
+      if (bPos.x > 4.1 && bPos.x < 13.05 && bPos.y > 0.8) {
+        if (bVel.x < 4.8) {
+          targetBallBody.setLinvel({ x: 5.2, y: Math.min(bVel.y, -0.8), z: 0 }, true);
+        }
+      }
+      // Settle targetBall inside the Goal Cup so it cannot bounce out
+      if (bPos.x >= 13.25 && bPos.x <= 15.55 && bPos.y <= 1.35) {
+        targetBallBody.setLinvel(
+          {
+            x: bVel.x * 0.82,
+            y: bVel.y > 0 ? bVel.y * 0.25 : bVel.y,
+            z: 0,
+          },
+          true,
+        );
+      }
+    }
+
+    // Sync visuals with Rapier bodies
+    const syncMesh = (body: RAPIER.RigidBody, mesh: THREE.Object3D): void => {
+      const t = body.translation();
+      const r = body.rotation();
+      mesh.position.set(t.x, t.y, t.z);
+      mesh.quaternion.set(r.x, r.y, r.z, r.w);
+    };
+
+    syncMesh(playerBody, playerMesh);
+    syncMesh(gongBody, gongMesh);
+    syncMesh(targetBallBody, targetBallMesh);
+    for (const d of dominoes) {
+      syncMesh(d.body, d.mesh);
+    }
+  };
+
+  const applyStrikeImpulse = (elapsedSeconds: number): boolean => {
+    if (elapsedSeconds - lastStrikeTime < 0.35) return false;
+    lastStrikeTime = elapsedSeconds;
+    const vel = playerBody.linvel();
+    playerBody.wakeUp();
+    playerBody.setLinvel({ x: Math.max(vel.x + 6.5, 8.2), y: vel.y + 0.4, z: vel.z }, true);
+
+    // If player is in physical contact range of domino_0's -X face, transfer strike directly
+    const pPos = playerBody.translation();
+    const d0Pos = dominoes[0].body.translation();
+    const distToD0 = Math.hypot(d0Pos.x - pPos.x, d0Pos.z - pPos.z);
+    if (pPos.x < d0Pos.x && distToD0 <= playerRadius + dominoHalfX + 0.35 && Math.abs(pPos.y - d0Pos.y) < 1.3) {
+      triggerDominoTopple(dominoes[0]);
+    }
+    return true;
+  };
+
+  const stepHumanAndRules = (_frameIndex: number, elapsedSeconds: number): StepResult => {
+    const moveSpeed = 6.8;
+    const curVel = playerBody.linvel();
+    let targetVx = curVel.x * 0.92;
+    let targetVz = curVel.z * 0.92;
+
+    const moveNorth = pressedKeys.has('KeyW') || pressedKeys.has('ArrowUp');
+    const moveSouth = pressedKeys.has('KeyS') || pressedKeys.has('ArrowDown');
+    const moveWest = pressedKeys.has('KeyA') || pressedKeys.has('ArrowLeft');
+    const moveEast = pressedKeys.has('KeyD') || pressedKeys.has('ArrowRight');
+
+    if (moveEast) targetVx = Math.max(targetVx, moveSpeed);
+    if (moveWest) targetVx = Math.min(targetVx, -moveSpeed);
+    if (moveNorth) targetVz = Math.min(targetVz, -moveSpeed);
+    if (moveSouth) targetVz = Math.max(targetVz, moveSpeed);
+
+    let targetVy = curVel.y;
+    if ((jumpQueued || pressedKeys.has('Space')) && isPlayerGrounded()) {
+      targetVy = 7.4;
+    }
+    jumpQueued = false;
+
+    playerBody.wakeUp();
+    playerBody.setLinvel({ x: targetVx, y: targetVy, z: targetVz }, true);
+
+    if (strikeQueued || pressedKeys.has('KeyF')) {
+      applyStrikeImpulse(elapsedSeconds);
+      strikeQueued = false;
+    }
+
+    updateSharedPhysicsAndVisuals(elapsedSeconds);
+
+    const pPos = playerBody.translation();
+    const bPos = targetBallBody.translation();
+    const failedEarly =
+      pPos.y < -4 || bPos.y < -4 ? 'A key physics body fell out of bounds' : undefined;
+
+    return {
+      botState: 'human-control',
+      goalReached: checkGoalReached(),
+      failedEarly,
+    };
+  };
+
+  const stepBotAndRules = (_frameIndex: number, elapsedSeconds: number): StepResult => {
+    const pPos = playerBody.translation();
+    const pVel = playerBody.linvel();
+    let botState = 'approaching-gong';
+
+    if (!gongTriggered && elapsedSeconds < 1.35) {
+      // Phase 1: Run East (+X) toward the Overhead Starter Gong at x = -8.9 and jump (Space) to hit it from below
+      const vx = pPos.x < -8.95 ? 5.6 : 2.8;
+      let vy = pVel.y;
+      if (pPos.x >= -9.55 && pPos.x <= -8.45 && isPlayerGrounded()) {
+        vy = 7.5;
+        botState = 'jumping-starter-gong';
+      }
+      playerBody.wakeUp();
+      playerBody.setLinvel({ x: vx, y: vy, z: -pPos.z * 3.0 }, true);
+    } else if (!dominoes[0].toppled) {
+      // Phase 2: Charge East (+X) into domino_0 at x = -6.0 and use KeyF Strike Impulse on approach
+      botState = 'striking-first-domino';
+      playerBody.wakeUp();
+      if (pPos.x >= -7.35 && elapsedSeconds - lastStrikeTime >= 0.35) {
+        applyStrikeImpulse(elapsedSeconds);
+      } else {
+        playerBody.setLinvel({ x: 6.8, y: pVel.y, z: -pPos.z * 4.0 }, true);
+      }
+    } else {
+      // Phase 3: Hold position safely on the Starter Platform while watching the cascade and ball roll into the cup
+      botState = ballKnocked ? 'watching-ball-roll-to-cup' : 'watching-domino-cascade';
+      const holdX = -7.4;
+      const holdZ = 0.0;
+      playerBody.setLinvel(
+        {
+          x: (holdX - pPos.x) * 3.5,
+          y: pVel.y,
+          z: (holdZ - pPos.z) * 3.5,
+        },
+        true,
+      );
+    }
+
+    updateSharedPhysicsAndVisuals(elapsedSeconds);
+
+    const bPos = targetBallBody.translation();
+    const failedEarly =
+      pPos.y < -4 || bPos.y < -4 ? 'A key physics body fell out of bounds' : undefined;
+
+    return {
+      botState,
+      goalReached: checkGoalReached(),
+      failedEarly,
+    };
+  };
+
+  const dispose = (): void => {
+    for (const obj of createdObjects) {
+      scene.remove(obj);
+    }
+    for (const geo of createdGeometries) {
+      geo.dispose();
+    }
+    for (const mat of createdMaterials) {
+      mat.dispose();
+    }
+    for (const body of createdBodies) {
+      if (world.bodies.contains(body.handle)) {
+        world.removeRigidBody(body);
+      }
+    }
+    namedBodies.clear();
+  };
+
+  return {
+    dispose,
+    stepBotAndRules,
+    stepHumanAndRules,
+    controls,
+    goal,
+    onPointerOrKey,
+  };
+}

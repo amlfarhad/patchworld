@@ -55,11 +55,20 @@ export interface HostedOrchestrator {
 // Demo: replays the bundled catapult script in the browser. No network, no API key.
 // ---------------------------------------------------------------------------------------------
 
-const fixtureSources = import.meta.glob('../fixtures/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
+// Recorded runs store their levels as .level files so the app typecheck skips them.
+const fixtureSources = import.meta.glob(['../fixtures/*.ts', '../fixtures/*.level'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>
 const fixtureScripts = import.meta.glob('../fixtures/*.script.json', { import: 'default', eager: true }) as Record<string, {
   goal: string
   steps: Array<{ files: Record<string, string>; diagnosis?: string; skillContent?: string }>
 }>
+const defaultScript = '../fixtures/catapult.script.json'
+
+/** The recorded Gemini run (src/fixtures/cached-*.script.json) for exactly this goal, i.e. a quick-start preset. */
+export function findCachedScript(goal: string): string | null {
+  const text = goal.trim()
+  const match = Object.entries(fixtureScripts).find(([path, script]) => /\/cached-[^/]+\.script\.json$/.test(path) && script.goal === text)
+  return match ? match[0] : null
+}
 
 const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) return reject(new DOMException('Aborted', 'AbortError'))
@@ -70,7 +79,14 @@ const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, r
 export class DemoOrchestrator implements HostedOrchestrator {
   readonly mock = true
   private step = 0
-  private readonly script = fixtureScripts['../fixtures/catapult.script.json']
+  private readonly script: (typeof fixtureScripts)[string]
+  /** A cached Gemini run of a preset, rather than the hand-written catapult demo. */
+  private readonly recorded: boolean
+
+  constructor(scriptPath: string = defaultScript, recorded = false) {
+    this.script = fixtureScripts[scriptPath] ?? fixtureScripts[defaultScript]
+    this.recorded = recorded
+  }
 
   private stepPatch(index: number): HostedPatch {
     const steps = this.script.steps
@@ -86,7 +102,9 @@ export class DemoOrchestrator implements HostedOrchestrator {
   async generate(goal: string, emit: Emit, signal: AbortSignal): Promise<HostedPatch> {
     this.step = 0
     const note = goal.trim() === this.script.goal ? '' : ' Demo mode always replays the catapult script; switch to Live to build your own idea.'
-    emit({ phase: 'synthesizing', message: `Demo: replaying a recorded catapult build.${note}` })
+    emit({ phase: 'synthesizing', message: this.recorded
+      ? 'Cached run: replaying a recorded Gemini build of this preset, failed attempts and fixes included. No API calls.'
+      : `Demo: replaying a recorded catapult build.${note}` })
     await sleep(1_500, signal)
     emit({ phase: 'thinking', message: 'Demo: writing level code…' })
     await sleep(1_500, signal)

@@ -1,7 +1,7 @@
 import type { GeneratedLevelModule } from '../engine/types'
 import { decodePlaytestPacket, type DaemonMessage, type FileChange, type GeneratedFilePayload, type IterationEntry } from '../shared/protocol'
 import { loadGeneratedLevel } from './moduleLoader'
-import { DemoOrchestrator, LiveOrchestrator, type HostedEvent, type HostedOrchestrator, type HostedPatch } from './orchestratorClients'
+import { DemoOrchestrator, LiveOrchestrator, findCachedScript, type HostedEvent, type HostedOrchestrator, type HostedPatch } from './orchestratorClients'
 
 /**
  * The hosted build's stand-in for server/syncDaemon.ts. It runs the same goal → playtest →
@@ -78,15 +78,16 @@ class InPageDaemon {
   }
 
   private orchestrator(): HostedOrchestrator {
-    return this.mock ? this.demo : new LiveOrchestrator(getLivePasscode())
+    return this.mock ? new DemoOrchestrator() : new LiveOrchestrator(getLivePasscode())
   }
+
+  /** Chosen when a goal starts and used for its critiques and repairs: a cached preset run, the demo, or live Gemini. */
+  private goalOrchestrator: HostedOrchestrator | null = null
 
   /** The Gemini conversation to continue. Demo patches never set one (see applyPatch), so a demo-N id never reaches Gemini. */
   private chainId(): string | undefined {
     return this.mock ? undefined : this.previousInteractionId
   }
-
-  private readonly demo = new DemoOrchestrator()
 
   private progress(event: HostedEvent): void {
     const timestamp = new Date().toISOString()
@@ -185,7 +186,10 @@ class InPageDaemon {
     this.publishHistory()
     this.deliver({ type: 'start-goal-accepted', goal: text })
     try {
-      const patch = await this.orchestrator().generate(text, this.emitter(epoch), this.controller.signal)
+      // Quick-start presets replay a recorded Gemini run instantly; anything else follows the mode.
+      const cached = findCachedScript(text)
+      this.goalOrchestrator = cached ? new DemoOrchestrator(cached, true) : this.orchestrator()
+      const patch = await this.goalOrchestrator.generate(text, this.emitter(epoch), this.controller.signal)
       await this.applyPatch(patch, epoch)
     } catch (error) {
       this.fail(error, epoch)
@@ -206,7 +210,9 @@ class InPageDaemon {
     this.worldGoal = this.activeGoal
     this.deliver({ type: 'start-goal-accepted', goal: this.activeGoal })
     try {
-      const patch = await this.orchestrator().revise({ goal: baseGoal, twist: text, currentFiles: this.currentFiles, previousInteractionId: this.chainId() }, this.emitter(epoch), this.controller.signal)
+      // A twist always follows the mode, even on a cached preset world.
+      this.goalOrchestrator = this.orchestrator()
+      const patch = await this.goalOrchestrator.revise({ goal: baseGoal, twist: text, currentFiles: this.currentFiles, previousInteractionId: this.chainId() }, this.emitter(epoch), this.controller.signal)
       await this.applyPatch(patch, epoch)
     } catch (error) {
       this.fail(error, epoch)
@@ -226,7 +232,7 @@ class InPageDaemon {
     }
     try {
       this.progress({ phase: 'critiquing', message: this.mock ? 'Demo critic is replaying a recorded review.' : 'The critic is reviewing the video and frame telemetry.', iteration: this.iteration })
-      const patch = await this.orchestrator().critique({
+      const patch = await (this.goalOrchestrator ?? this.orchestrator()).critique({
         videoBytes: packet.videoBytes,
         metadata: packet.metadata,
         currentFiles: this.currentFiles,
@@ -257,7 +263,7 @@ class InPageDaemon {
     }
     try {
       this.progress({ phase: 'critiquing', message: 'The level crashed while loading; asking for a repair.', iteration: this.iteration })
-      const patch = await this.orchestrator().repair({ error, stack, currentFiles: this.currentFiles, previousInteractionId: this.chainId(), iteration: this.iteration }, this.emitter(epoch), this.controller.signal)
+      const patch = await (this.goalOrchestrator ?? this.orchestrator()).repair({ error, stack, currentFiles: this.currentFiles, previousInteractionId: this.chainId(), iteration: this.iteration }, this.emitter(epoch), this.controller.signal)
       await this.applyPatch(patch, epoch)
     } catch (repairError) {
       this.fail(repairError, epoch)

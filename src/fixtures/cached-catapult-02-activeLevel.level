@@ -1,0 +1,1241 @@
+import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+import type {
+  ControlBinding,
+  LevelGoal,
+  MountedLevel,
+  StepResult,
+} from '../engine/types';
+
+interface SyncPair {
+  body: RAPIER.RigidBody;
+  mesh: THREE.Object3D;
+}
+
+interface SplashParticle {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  life: number;
+  maxLife: number;
+}
+
+export function buildWorld(
+  scene: THREE.Scene,
+  world: RAPIER.World,
+  namedBodies: Map<string, RAPIER.RigidBody>,
+  eventQueue: RAPIER.EventQueue,
+): MountedLevel {
+  const createdObjects: THREE.Object3D[] = [];
+  const createdBodies: RAPIER.RigidBody[] = [];
+  const createdJoints: RAPIER.ImpulseJoint[] = [];
+  const syncPairs: SyncPair[] = [];
+  const disposables: Array<{ dispose: () => void }> = [];
+
+  const trackMesh = <T extends THREE.Object3D>(obj: T): T => {
+    scene.add(obj);
+    createdObjects.push(obj);
+    return obj;
+  };
+
+  const trackGeo = <T extends THREE.BufferGeometry>(geo: T): T => {
+    disposables.push(geo);
+    return geo;
+  };
+
+  const trackMat = <T extends THREE.Material>(mat: T): T => {
+    disposables.push(mat);
+    return mat;
+  };
+
+  const createBody = (desc: RAPIER.RigidBodyDesc, name?: string): RAPIER.RigidBody => {
+    const body = world.createRigidBody(desc);
+    createdBodies.push(body);
+    if (name) {
+      namedBodies.set(name, body);
+    }
+    return body;
+  };
+
+  // Materials
+  const woodDarkMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.82, metalness: 0.08 }),
+  );
+  const woodLightMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.76, metalness: 0.08 }),
+  );
+  const ironMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x3b424c, roughness: 0.42, metalness: 0.78 }),
+  );
+  const stoneMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x646b73, roughness: 0.88, metalness: 0.1 }),
+  );
+  const basaltMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x2a272b, roughness: 0.9, metalness: 0.15 }),
+  );
+  const boulderMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x4f565e,
+      roughness: 0.65,
+      metalness: 0.25,
+      emissive: 0x331100,
+      emissiveIntensity: 0.35,
+    }),
+  );
+  const goldMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xf5b926,
+      roughness: 0.3,
+      metalness: 0.8,
+      emissive: 0x664400,
+      emissiveIntensity: 0.35,
+    }),
+  );
+  const spentBlockMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x6e6259, roughness: 0.75, metalness: 0.3 }),
+  );
+  const pedalReadyMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xe63946,
+      roughness: 0.38,
+      metalness: 0.3,
+      emissive: 0x550810,
+      emissiveIntensity: 0.45,
+    }),
+  );
+  const pedalActiveMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x2ec4b6,
+      roughness: 0.35,
+      metalness: 0.4,
+      emissive: 0x0b554e,
+      emissiveIntensity: 0.6,
+    }),
+  );
+  const bossRedMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xd91e2a,
+      roughness: 0.35,
+      metalness: 0.25,
+      emissive: 0x4a0408,
+      emissiveIntensity: 0.4,
+    }),
+  );
+  const bossDarkMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x1e1114, roughness: 0.5, metalness: 0.6 }),
+  );
+  const eyeGlowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xfff3b0,
+      emissive: 0xffaa00,
+      emissiveIntensity: 1.2,
+      roughness: 0.2,
+    }),
+  );
+  const lavaMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xff4500,
+      emissive: 0xff3300,
+      emissiveIntensity: 1.15,
+      roughness: 0.28,
+      metalness: 0.05,
+    }),
+  );
+  const lavaBubbleMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xffbe0b,
+      emissive: 0xff7b00,
+      emissiveIntensity: 1.4,
+      roughness: 0.2,
+    }),
+  );
+  const playerBodyMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.35, metalness: 0.45 }),
+  );
+
+  const makeStaticBox = (
+    x: number,
+    y: number,
+    z: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    mat: THREE.Material,
+    name?: string,
+  ): { body: RAPIER.RigidBody; mesh: THREE.Mesh; collider: RAPIER.Collider } => {
+    const body = createBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z), name);
+    const collider = world.createCollider(
+      RAPIER.ColliderDesc.cuboid(hx, hy, hz).setFriction(0.75).setRestitution(0.1),
+      body,
+    );
+    const mesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2)), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    trackMesh(mesh);
+    return { body, mesh, collider };
+  };
+
+  // ============================================================================
+  // 1. SIEGE PLATFORM & TENSION UPGRADE BLOCK (West Side: x = -15..-5)
+  // ============================================================================
+  // Flush stone paving under the catapult and player runway (visual only so floor is 100% smooth)
+  const siegeFloorMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(11.5, 0.06, 7.2)),
+    stoneMat,
+  );
+  siegeFloorMesh.position.set(-10.8, 0.03, 1.4);
+  siegeFloorMesh.receiveShadow = true;
+  trackMesh(siegeFloorMesh);
+
+  // Overhead Tension Gear Block at (-13.5, 2.85, 2.8) — clear corridor along z = 2.8
+  // Support gantry posts are placed far outside the z = 2.8 corridor (at z = 1.35 and z = 4.25)
+  makeStaticBox(-13.5, 1.65, 1.35, 0.16, 1.65, 0.16, ironMat);
+  makeStaticBox(-13.5, 1.65, 4.25, 0.16, 1.65, 0.16, ironMat);
+
+  const tensionBlockPos = new THREE.Vector3(-13.5, 2.85, 2.8);
+  const tensionBlockBody = createBody(
+    RAPIER.RigidBodyDesc.fixed().setTranslation(
+      tensionBlockPos.x,
+      tensionBlockPos.y,
+      tensionBlockPos.z,
+    ),
+    'tensionBlock',
+  );
+  const tensionBlockCollider = world.createCollider(
+    RAPIER.ColliderDesc.cuboid(0.85, 0.45, 0.85)
+      .setFriction(0.5)
+      .setRestitution(0.2)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    tensionBlockBody,
+  );
+  const tensionBlockGroup = new THREE.Group();
+  tensionBlockGroup.position.copy(tensionBlockPos);
+  const tensionBlockMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(1.7, 0.9, 1.7)),
+    goldMat,
+  );
+  tensionBlockMesh.castShadow = true;
+  tensionBlockMesh.receiveShadow = true;
+  tensionBlockGroup.add(tensionBlockMesh);
+
+  // Decorative gear ring around the tension block
+  const gearRingMesh = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.95, 0.95, 0.35, 12)),
+    ironMat,
+  );
+  gearRingMesh.rotation.z = Math.PI * 0.5;
+  tensionBlockGroup.add(gearRingMesh);
+  trackMesh(tensionBlockGroup);
+
+  // Torsion Core visual that connects to the catapult once tension block is struck
+  const torsionCoreMesh = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.32, 0.32, 3.1, 16)),
+    goldMat,
+  );
+  torsionCoreMesh.rotation.x = Math.PI * 0.5;
+  torsionCoreMesh.position.set(-8.5, 2.0, 0);
+  torsionCoreMesh.visible = false;
+  trackMesh(torsionCoreMesh);
+
+  // ============================================================================
+  // 2. LAUNCH TRIGGER PEDAL (Aligned at x = -10.2, z = 2.8 for a direct run)
+  // ============================================================================
+  const pedalBaseVisual = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(2.2, 0.1, 2.2)),
+    ironMat,
+  );
+  pedalBaseVisual.position.set(-10.2, 0.05, 2.8);
+  pedalBaseVisual.receiveShadow = true;
+  trackMesh(pedalBaseVisual);
+
+  const pedalBody = createBody(
+    RAPIER.RigidBodyDesc.fixed().setTranslation(-10.2, 0.22, 2.8),
+    'launchPedal',
+  );
+  const pedalCollider = world.createCollider(
+    RAPIER.ColliderDesc.cuboid(0.95, 0.2, 0.95)
+      .setFriction(0.8)
+      .setRestitution(0.05)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    pedalBody,
+  );
+  const pedalMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(1.9, 0.4, 1.9)),
+    pedalReadyMat,
+  );
+  pedalMesh.position.set(-10.2, 0.22, 2.8);
+  pedalMesh.castShadow = true;
+  pedalMesh.receiveShadow = true;
+  trackMesh(pedalMesh);
+
+  // ============================================================================
+  // 3. THE CATAPULT & BOULDER (Centered at x = -8.5, z = 0)
+  // ============================================================================
+  const catapultBase = createBody(
+    RAPIER.RigidBodyDesc.fixed().setTranslation(-8.5, 2.0, 0),
+    'catapultBase',
+  );
+  // Left and right timber A-frame rails (outside the arm swing corridor z in [-1.0, 1.0])
+  world.createCollider(
+    RAPIER.ColliderDesc.cuboid(3.2, 0.9, 0.25).setTranslation(-1.0, -0.9, -1.45),
+    catapultBase,
+  );
+  world.createCollider(
+    RAPIER.ColliderDesc.cuboid(3.2, 0.9, 0.25).setTranslation(-1.0, -0.9, 1.45),
+    catapultBase,
+  );
+
+  const catapultFrameGroup = new THREE.Group();
+  catapultFrameGroup.position.set(-8.5, 0, 0);
+  for (const side of [-1, 1]) {
+    const zOff = side * 1.45;
+    const baseBeam = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(6.6, 0.45, 0.45)), woodDarkMat);
+    baseBeam.position.set(-1.0, 0.52, zOff);
+    baseBeam.castShadow = true;
+    baseBeam.receiveShadow = true;
+    catapultFrameGroup.add(baseBeam);
+
+    const upright = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.5, 2.3, 0.45)), woodDarkMat);
+    upright.position.set(0, 1.65, zOff);
+    upright.castShadow = true;
+    catapultFrameGroup.add(upright);
+
+    const braceBack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.6, 0.32, 0.35)), woodLightMat);
+    braceBack.position.set(-1.2, 1.45, zOff);
+    braceBack.rotation.z = 0.58;
+    catapultFrameGroup.add(braceBack);
+
+    const braceFront = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.2, 0.32, 0.35)), woodLightMat);
+    braceFront.position.set(0.95, 1.45, zOff);
+    braceFront.rotation.z = -0.68;
+    catapultFrameGroup.add(braceFront);
+
+    // Siege wheels
+    for (const wx of [-3.2, 1.2]) {
+      const wheel = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(0.62, 0.62, 0.28, 18)),
+        ironMat,
+      );
+      wheel.rotation.x = Math.PI * 0.5;
+      wheel.position.set(wx, 0.62, side * 1.78);
+      wheel.castShadow = true;
+      catapultFrameGroup.add(wheel);
+    }
+  }
+  // Pivot axle visual
+  const axleMesh = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.22, 0.22, 3.4, 16)),
+    ironMat,
+  );
+  axleMesh.rotation.x = Math.PI * 0.5;
+  axleMesh.position.set(0, 2.0, 0);
+  catapultFrameGroup.add(axleMesh);
+  trackMesh(catapultFrameGroup);
+
+  // Dynamic Catapult Arm hinged at (-8.5, 2.0, 0)
+  // Single non-overlapping beam collider so the boulder sits cleanly on top without penetration
+  const catapultArm = createBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(-8.5, 2.0, 0)
+      .setLinearDamping(0.15)
+      .setAngularDamping(0.25)
+      .setCanSleep(false),
+    'catapultArm',
+  );
+  world.createCollider(
+    RAPIER.ColliderDesc.cuboid(2.6, 0.16, 0.42)
+      .setTranslation(-1.2, 0, 0)
+      .setDensity(4.0)
+      .setFriction(0.6),
+    catapultArm,
+  );
+
+  const armVisualGroup = new THREE.Group();
+  const armBeamMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(5.6, 0.32, 0.76)),
+    woodLightMat,
+  );
+  armBeamMesh.position.set(-1.1, 0, 0);
+  armBeamMesh.castShadow = true;
+  armBeamMesh.receiveShadow = true;
+  armVisualGroup.add(armBeamMesh);
+
+  const cupFloorMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(1.5, 0.18, 1.5)),
+    ironMat,
+  );
+  cupFloorMesh.position.set(-3.2, 0.12, 0);
+  armVisualGroup.add(cupFloorMesh);
+
+  const cupBackMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(0.24, 0.65, 1.5)),
+    ironMat,
+  );
+  cupBackMesh.position.set(-3.88, 0.42, 0);
+  armVisualGroup.add(cupBackMesh);
+
+  const counterweightMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(1.1, 0.95, 1.25)),
+    ironMat,
+  );
+  counterweightMesh.position.set(1.35, -0.15, 0);
+  counterweightMesh.castShadow = true;
+  armVisualGroup.add(counterweightMesh);
+  trackMesh(armVisualGroup);
+  syncPairs.push({ body: catapultArm, mesh: armVisualGroup });
+
+  // Revolute Joint around Z axis at (-8.5, 2.0, 0)
+  const revJointData = RAPIER.JointData.revolute(
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+  );
+  const catapultJoint = world.createImpulseJoint(revJointData, catapultBase, catapultArm, true);
+  createdJoints.push(catapultJoint);
+
+  // Temporary latch joint keeping the arm horizontal until fired
+  const armLatchData = RAPIER.JointData.fixed(
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+  );
+  let armLatchJoint: RAPIER.ImpulseJoint | null = world.createImpulseJoint(
+    armLatchData,
+    catapultBase,
+    catapultArm,
+    true,
+  );
+  createdJoints.push(armLatchJoint);
+
+  // The Siege Boulder resting in the catapult cradle at (-11.7, 3.04, 0)
+  const boulderRadius = 0.82;
+  const boulderBody = createBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(-11.7, 3.04, 0)
+      .setCcdEnabled(true)
+      .setLinearDamping(0.02)
+      .setAngularDamping(0.05)
+      .setCanSleep(false),
+    'boulder',
+  );
+  const boulderCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(boulderRadius)
+      .setDensity(8.5)
+      .setRestitution(0.25)
+      .setFriction(0.55)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    boulderBody,
+  );
+
+  // Cradle Latch Joint holds the boulder securely in the cup until the arm swings up to release
+  const boulderLatchData = RAPIER.JointData.fixed(
+    { x: -3.2, y: 1.04, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0, w: 1 },
+  );
+  let boulderLatchJoint: RAPIER.ImpulseJoint | null = world.createImpulseJoint(
+    boulderLatchData,
+    catapultArm,
+    boulderBody,
+    true,
+  );
+  createdJoints.push(boulderLatchJoint);
+
+  const boulderGroup = new THREE.Group();
+  const boulderMesh = new THREE.Mesh(
+    trackGeo(new THREE.DodecahedronGeometry(boulderRadius, 1)),
+    boulderMat,
+  );
+  boulderMesh.castShadow = true;
+  boulderMesh.receiveShadow = true;
+  boulderGroup.add(boulderMesh);
+
+  const magmaBand = new THREE.Mesh(
+    trackGeo(new THREE.TorusGeometry(boulderRadius * 0.88, 0.09, 8, 20)),
+    lavaMat,
+  );
+  boulderGroup.add(magmaBand);
+  trackMesh(boulderGroup);
+  syncPairs.push({ body: boulderBody, mesh: boulderGroup });
+
+  // ============================================================================
+  // 4. LAVA PIT, DESTRUCTIBLE BRIDGE, & RED BOSS CUBE (East Side: x = 3.8..13.8)
+  // ============================================================================
+  // Basalt containment caldera walls around the lava pit (x in [3.8, 13.8], z in [-5.2, 5.2])
+  makeStaticBox(3.8, 0.65, 0, 0.35, 0.65, 5.2, basaltMat);
+  makeStaticBox(13.8, 0.65, 0, 0.35, 0.65, 5.2, basaltMat);
+  makeStaticBox(8.8, 0.65, -5.2, 5.3, 0.65, 0.35, basaltMat);
+  makeStaticBox(8.8, 0.65, 5.2, 5.3, 0.65, 0.35, basaltMat);
+
+  // Tall fortress backstop wall on the far side of the lava pit (x = 13.7) so boss cube drops cleanly into the lava
+  makeStaticBox(13.7, 4.8, 0, 0.45, 4.8, 4.6, basaltMat);
+
+  // Glowing Molten Lava Surface
+  const lavaSurfaceMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(9.4, 0.32, 9.8)),
+    lavaMat,
+  );
+  lavaSurfaceMesh.position.set(8.8, 0.18, 0);
+  lavaSurfaceMesh.receiveShadow = true;
+  trackMesh(lavaSurfaceMesh);
+
+  const lavaLight = new THREE.PointLight(0xff5500, 3.2, 18);
+  lavaLight.position.set(8.8, 2.2, 0);
+  trackMesh(lavaLight);
+
+  // Animated lava bubbles
+  const lavaBubbles: Array<{ mesh: THREE.Mesh; baseX: number; baseZ: number; phase: number }> = [];
+  for (let i = 0; i < 10; i++) {
+    const bx = 5.2 + (i % 5) * 1.75;
+    const bz = i < 5 ? -2.2 + (i % 3) * 2.1 : 1.5 - (i % 3) * 1.8;
+    const bMesh = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.28, 12, 10)), lavaBubbleMat);
+    bMesh.position.set(bx, 0.34, bz);
+    trackMesh(bMesh);
+    lavaBubbles.push({ mesh: bMesh, baseX: bx, baseZ: bz, phase: i * 0.9 });
+  }
+
+  // Lava Pit Sensor Zone
+  const lavaSensorBody = createBody(RAPIER.RigidBodyDesc.fixed().setTranslation(8.8, 1.35, 0));
+  const lavaSensorCollider = world.createCollider(
+    RAPIER.ColliderDesc.cuboid(4.6, 1.45, 4.8)
+      .setSensor(true)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    lavaSensorBody,
+  );
+
+  // North & South Stone Bridge Towers (Piers)
+  const northPier = makeStaticBox(8.5, 3.0, -6.0, 1.6, 3.0, 1.1, stoneMat, 'northPier');
+  makeStaticBox(8.5, 3.0, 6.0, 1.6, 3.0, 1.1, stoneMat, 'southPier');
+
+  // Reachable Stone Staircase leading up to the South Bridge Pier (x = 1.5..6.5, z = 6.0)
+  makeStaticBox(1.8, 0.6, 6.0, 0.8, 0.6, 1.0, stoneMat);
+  makeStaticBox(3.4, 1.8, 6.0, 0.8, 0.6, 1.0, stoneMat);
+  makeStaticBox(5.0, 3.2, 6.0, 0.8, 0.6, 1.0, stoneMat);
+  makeStaticBox(6.4, 4.6, 6.0, 0.8, 0.6, 1.0, stoneMat);
+
+  // Destructible Bridge Span (z = -4.0 to +4.0 at x = 8.5, y = 6.1)
+  const bridgeBodies: RAPIER.RigidBody[] = [];
+  const bridgeColliderHandles = new Set<number>();
+  const bridgeSupportJoints: RAPIER.ImpulseJoint[] = [];
+
+  const plankZPositions = [-3.6, -1.8, 0.0, 1.8, 3.6];
+  plankZPositions.forEach((pz, idx) => {
+    const plankBody = createBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(8.5, 6.12, pz)
+        .setLinearDamping(0.1)
+        .setAngularDamping(0.15)
+        .setCanSleep(false),
+      `bridgePlank_${idx}`,
+    );
+    const col = world.createCollider(
+      RAPIER.ColliderDesc.cuboid(1.35, 0.18, 0.84)
+        .setDensity(1.5)
+        .setFriction(0.65)
+        .setRestitution(0.15)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      plankBody,
+    );
+    bridgeColliderHandles.add(col.handle);
+    bridgeBodies.push(plankBody);
+
+    const plankMesh = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(2.7, 0.36, 1.68)),
+      idx === 2 ? woodDarkMat : woodLightMat,
+    );
+    plankMesh.castShadow = true;
+    plankMesh.receiveShadow = true;
+    trackMesh(plankMesh);
+    syncPairs.push({ body: plankBody, mesh: plankMesh });
+
+    // Anchor plank to North Pier using a breakable Fixed Joint until boulder impact
+    const jData = RAPIER.JointData.fixed(
+      { x: 0, y: 3.12, z: pz - -6.0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+    );
+    const j = world.createImpulseJoint(jData, northPier.body, plankBody, true);
+    createdJoints.push(j);
+    bridgeSupportJoints.push(j);
+  });
+
+  // Underside Bridge Support Struts directly in the boulder's flight path (x = 8.1, y = 4.9, z = ±0.85)
+  [-0.85, 0.85].forEach((sz, idx) => {
+    const strutBody = createBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(8.1, 4.95, sz)
+        .setCanSleep(false),
+      `bridgeStrut_${idx}`,
+    );
+    const col = world.createCollider(
+      RAPIER.ColliderDesc.cuboid(0.32, 0.98, 0.32)
+        .setDensity(1.4)
+        .setFriction(0.5)
+        .setRestitution(0.2)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      strutBody,
+    );
+    bridgeColliderHandles.add(col.handle);
+    bridgeBodies.push(strutBody);
+
+    const strutMesh = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.64, 1.96, 0.64)),
+      woodDarkMat,
+    );
+    strutMesh.castShadow = true;
+    strutMesh.receiveShadow = true;
+    trackMesh(strutMesh);
+    syncPairs.push({ body: strutBody, mesh: strutMesh });
+
+    const jData = RAPIER.JointData.fixed(
+      { x: -0.4, y: 1.95, z: sz - -6.0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+    );
+    const j = world.createImpulseJoint(jData, northPier.body, strutBody, true);
+    createdJoints.push(j);
+    bridgeSupportJoints.push(j);
+  });
+
+  // Front & Back Wooden Bridge Railings on the center span
+  [-1.2, 1.2].forEach((rx, idx) => {
+    const railBody = createBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(8.5 + rx, 6.65, 0)
+        .setCanSleep(false),
+      `bridgeRail_${idx}`,
+    );
+    const col = world.createCollider(
+      RAPIER.ColliderDesc.cuboid(0.14, 0.35, 2.2)
+        .setDensity(1.0)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      railBody,
+    );
+    bridgeColliderHandles.add(col.handle);
+    bridgeBodies.push(railBody);
+
+    const railMesh = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.28, 0.7, 4.4)),
+      woodLightMat,
+    );
+    railMesh.castShadow = true;
+    trackMesh(railMesh);
+    syncPairs.push({ body: railBody, mesh: railMesh });
+
+    const jData = RAPIER.JointData.fixed(
+      { x: rx, y: 3.65, z: 6.0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 0, z: 0, w: 1 },
+    );
+    const j = world.createImpulseJoint(jData, northPier.body, railBody, true);
+    createdJoints.push(j);
+    bridgeSupportJoints.push(j);
+  });
+
+  // THE RED BOSS CUBE perched atop the center of the bridge at (8.5, 7.18, 0)
+  const bossHalf = 0.85;
+  const bossCubeBody = createBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(8.5, 7.18, 0)
+      .setLinearDamping(0.08)
+      .setAngularDamping(0.15)
+      .setCcdEnabled(true)
+      .setCanSleep(false),
+    'bossCube',
+  );
+  const bossCubeCollider = world.createCollider(
+    RAPIER.ColliderDesc.cuboid(bossHalf, bossHalf, bossHalf)
+      .setDensity(3.2)
+      .setFriction(0.6)
+      .setRestitution(0.1)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    bossCubeBody,
+  );
+  bridgeColliderHandles.add(bossCubeCollider.handle);
+
+  const bossGroup = new THREE.Group();
+  const bossCoreMesh = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(bossHalf * 2, bossHalf * 2, bossHalf * 2)),
+    bossRedMat,
+  );
+  bossCoreMesh.castShadow = true;
+  bossCoreMesh.receiveShadow = true;
+  bossGroup.add(bossCoreMesh);
+
+  // Glowing angry eyes & brow facing the catapult (-X face)
+  for (const ez of [-0.36, 0.36]) {
+    const eyeMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.12, 0.26, 0.32)), eyeGlowMat);
+    eyeMesh.position.set(-bossHalf - 0.02, 0.14, ez);
+    bossGroup.add(eyeMesh);
+
+    const browMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.15, 0.12, 0.42)), bossDarkMat);
+    browMesh.position.set(-bossHalf - 0.04, 0.34, ez);
+    browMesh.rotation.x = ez < 0 ? 0.32 : -0.32;
+    bossGroup.add(browMesh);
+  }
+  // Boss Crown on top
+  const crownBase = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.48, 0.42, 0.32, 8)),
+    goldMat,
+  );
+  crownBase.position.set(0, bossHalf + 0.16, 0);
+  bossGroup.add(crownBase);
+  trackMesh(bossGroup);
+  syncPairs.push({ body: bossCubeBody, mesh: bossGroup });
+
+  // ============================================================================
+  // 5. PLAYER / BOT SIEGE ENGINEER (Starts at x = -15.2, y = 0.65, z = 2.8)
+  // ============================================================================
+  const playerRadius = 0.62;
+  const playerBody = createBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(-15.2, 0.65, 2.8)
+      .lockRotations()
+      .setLinearDamping(1.2)
+      .setCanSleep(false),
+    'player',
+  );
+  const playerCollider = world.createCollider(
+    RAPIER.ColliderDesc.ball(playerRadius)
+      .setDensity(2.2)
+      .setFriction(0.15)
+      .setRestitution(0.05)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+    playerBody,
+  );
+  const playerGroup = new THREE.Group();
+  const playerSphere = new THREE.Mesh(
+    trackGeo(new THREE.SphereGeometry(playerRadius, 20, 16)),
+    playerBodyMat,
+  );
+  playerSphere.castShadow = true;
+  playerSphere.receiveShadow = true;
+  playerGroup.add(playerSphere);
+
+  const helmetMesh = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.46, 0.56, 0.32, 16)),
+    goldMat,
+  );
+  helmetMesh.position.set(0, 0.42, 0);
+  playerGroup.add(helmetMesh);
+
+  const visorMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.38, 0.18, 0.58)), eyeGlowMat);
+  visorMesh.position.set(0.35, 0.12, 0);
+  playerGroup.add(visorMesh);
+  trackMesh(playerGroup);
+  syncPairs.push({ body: playerBody, mesh: playerGroup });
+
+  // ============================================================================
+  // 6. GAMEPLAY STATE, MECHANICS, & COLLISION HANDLERS
+  // ============================================================================
+  let tensionCharged = false;
+  let catapultLaunched = false;
+  let catapultReleaseDone = false;
+  let launchStartTime = -1;
+  let bridgeBroken = false;
+  let bossInLavaFrames = 0;
+  let splashSpawned = false;
+  const splashParticles: SplashParticle[] = [];
+
+  const spawnLavaSplash = (origin: THREE.Vector3) => {
+    if (splashSpawned) return;
+    splashSpawned = true;
+    for (let i = 0; i < 18; i++) {
+      const angle = (i / 18) * Math.PI * 2;
+      const speed = 3.2 + (i % 4) * 1.4;
+      const pMesh = new THREE.Mesh(
+        trackGeo(new THREE.SphereGeometry(0.22, 8, 8)),
+        i % 2 === 0 ? lavaBubbleMat : lavaMat,
+      );
+      pMesh.position.set(origin.x, 0.55, origin.z);
+      trackMesh(pMesh);
+      splashParticles.push({
+        mesh: pMesh,
+        vel: new THREE.Vector3(
+          Math.cos(angle) * speed,
+          5.5 + (i % 3) * 1.8,
+          Math.sin(angle) * speed,
+        ),
+        life: 0,
+        maxLife: 1.1,
+      });
+    }
+  };
+
+  const activateTensionBlock = () => {
+    if (tensionCharged) return;
+    tensionCharged = true;
+    tensionBlockMesh.material = spentBlockMat;
+    tensionBlockBody.setTranslation(
+      { x: tensionBlockPos.x, y: tensionBlockPos.y + 0.18, z: tensionBlockPos.z },
+      true,
+    );
+    tensionBlockGroup.position.set(tensionBlockPos.x, tensionBlockPos.y + 0.18, tensionBlockPos.z);
+    torsionCoreMesh.visible = true;
+  };
+
+  const triggerCatapultLaunch = (elapsedSeconds: number) => {
+    if (catapultLaunched) return;
+    catapultLaunched = true;
+    launchStartTime = elapsedSeconds;
+
+    // Depress and light up the launch pedal
+    pedalMesh.material = pedalActiveMat;
+    pedalBody.setTranslation({ x: -10.2, y: 0.1, z: 2.8 }, true);
+    pedalMesh.position.set(-10.2, 0.1, 2.8);
+
+    // Remove the horizontal latch joint so the catapult arm swings around Z
+    if (armLatchJoint) {
+      const idx = createdJoints.indexOf(armLatchJoint);
+      if (idx >= 0) createdJoints.splice(idx, 1);
+      world.removeImpulseJoint(armLatchJoint, true);
+      armLatchJoint = null;
+    }
+    catapultArm.wakeUp();
+    boulderBody.wakeUp();
+    catapultArm.setAngvel({ x: 0, y: 0, z: -10.5 }, true);
+  };
+
+  const shatterBridge = () => {
+    if (bridgeBroken) return;
+    bridgeBroken = true;
+
+    // Remove all fixed joints holding the bridge planks, struts, and rails
+    while (bridgeSupportJoints.length > 0) {
+      const j = bridgeSupportJoints.pop()!;
+      const idx = createdJoints.indexOf(j);
+      if (idx >= 0) createdJoints.splice(idx, 1);
+      world.removeImpulseJoint(j, true);
+    }
+
+    // Scatter the bridge planks and struts physically so the center opens cleanly
+    bridgeBodies.forEach((b, i) => {
+      b.wakeUp();
+      const pos = b.translation();
+      const zDir = pos.z < -0.2 ? -1 : pos.z > 0.2 ? 1 : 0;
+      b.setLinvel(
+        {
+          x: 5.5 + (i % 3) * 1.8,
+          y: -3.5 - (i % 2) * 1.5,
+          z: zDir * 4.2,
+        },
+        true,
+      );
+      b.setAngvel(
+        {
+          x: zDir * 3.5,
+          y: 1.5,
+          z: -3.2,
+        },
+        true,
+      );
+    });
+
+    // Keep the heavy boulder ploughing through the shattered bridge
+    boulderBody.setLinvel({ x: 13.5, y: -2.0, z: 0 }, true);
+
+    // Wake up the Red Boss Cube so gravity drops it straight into the lava pit below
+    bossCubeBody.wakeUp();
+    bossCubeBody.setLinvel({ x: 1.5, y: -4.5, z: 0 }, true);
+  };
+
+  const evaluateContactsAndRules = (elapsedSeconds: number) => {
+    const pPos = playerBody.translation();
+    const pVel = playerBody.linvel();
+
+    // Drain collision events from Rapier eventQueue
+    eventQueue.drainCollisionEvents((h1, h2, started) => {
+      if (!started) return;
+
+      // 1. Player hitting Tension Block from below
+      const isTensionPair =
+        (h1 === playerCollider.handle && h2 === tensionBlockCollider.handle) ||
+        (h2 === playerCollider.handle && h1 === tensionBlockCollider.handle);
+      if (isTensionPair && pPos.y < tensionBlockPos.y - 0.25 && pVel.y >= -2.0) {
+        activateTensionBlock();
+      }
+
+      // 2. Player stomping Launch Pedal from above
+      const isPedalPair =
+        (h1 === playerCollider.handle && h2 === pedalCollider.handle) ||
+        (h2 === playerCollider.handle && h1 === pedalCollider.handle);
+      if (isPedalPair && pPos.y > 0.55 && pVel.y <= 1.2) {
+        triggerCatapultLaunch(elapsedSeconds);
+      }
+
+      // 3. Boulder impacting any Bridge Plank, Strut, Rail, or Boss Cube
+      const isBoulderBridge =
+        (h1 === boulderCollider.handle && bridgeColliderHandles.has(h2)) ||
+        (h2 === boulderCollider.handle && bridgeColliderHandles.has(h1));
+      if (isBoulderBridge) {
+        shatterBridge();
+      }
+
+      // 4. Boss Cube entering Lava Sensor
+      const isBossLava =
+        (h1 === bossCubeCollider.handle && h2 === lavaSensorCollider.handle) ||
+        (h2 === bossCubeCollider.handle && h1 === lavaSensorCollider.handle);
+      if (isBossLava) {
+        const bPos = bossCubeBody.translation();
+        spawnLavaSplash(new THREE.Vector3(bPos.x, 0.4, bPos.z));
+      }
+    });
+
+    // Backup manifold checks so continuous contacts across substeps are never missed
+    if (!tensionCharged) {
+      world.contactPairsWith(tensionBlockCollider, (other) => {
+        if (other.handle === playerCollider.handle && pPos.y < tensionBlockPos.y - 0.25) {
+          activateTensionBlock();
+        }
+      });
+    }
+    if (!catapultLaunched) {
+      world.contactPairsWith(pedalCollider, (other) => {
+        if (other.handle === playerCollider.handle && pPos.y > 0.55 && pVel.y <= 1.2) {
+          triggerCatapultLaunch(elapsedSeconds);
+        }
+      });
+    }
+    if (!bridgeBroken) {
+      world.contactPairsWith(boulderCollider, (other) => {
+        if (bridgeColliderHandles.has(other.handle)) {
+          shatterBridge();
+        }
+      });
+    }
+
+    // Handle Catapult Arm swing & deterministic ballistic release at peak arc
+    if (catapultLaunched && launchStartTime >= 0) {
+      const dtLaunch = elapsedSeconds - launchStartTime;
+      if (dtLaunch < 0.14) {
+        catapultArm.setAngvel({ x: 0, y: 0, z: -10.5 }, true);
+      } else if (!catapultReleaseDone) {
+        catapultReleaseDone = true;
+
+        // Release the cradle latch joint so the boulder separates cleanly
+        if (boulderLatchJoint) {
+          const idx = createdJoints.indexOf(boulderLatchJoint);
+          if (idx >= 0) createdJoints.splice(idx, 1);
+          world.removeImpulseJoint(boulderLatchJoint, true);
+          boulderLatchJoint = null;
+        }
+
+        // Lock the catapult arm at its ~60 degree upper stop
+        const stopAngle = -1.02;
+        const half = stopAngle * 0.5;
+        catapultArm.setRotation({ x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) }, true);
+        catapultArm.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        catapultArm.setLinvel({ x: 0, y: 0, z: 0 }, true);
+
+        // Release the boulder along the exact ballistic trajectory into the bridge center span
+        const launchVx = tensionCharged ? 22.0 : 20.8;
+        const launchVy = tensionCharged ? 5.25 : 4.95;
+        boulderBody.setTranslation({ x: -8.5, y: 4.4, z: 0 }, true);
+        boulderBody.setLinvel({ x: launchVx, y: launchVy, z: 0 }, true);
+        boulderBody.setAngvel({ x: 0, y: 0, z: -12.0 }, true);
+      } else {
+        // Keep arm steady against the stop bar after release
+        const stopAngle = -1.02;
+        const half = stopAngle * 0.5;
+        catapultArm.setRotation({ x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) }, true);
+        catapultArm.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      }
+    }
+
+    // Guide bossCube cleanly into the lava basin once the bridge breaks
+    if (bridgeBroken) {
+      const bossPos = bossCubeBody.translation();
+      const bossVel = bossCubeBody.linvel();
+      if (bossPos.y < 2.4 && !splashSpawned) {
+        spawnLavaSplash(new THREE.Vector3(bossPos.x, 0.4, bossPos.z));
+      }
+      // Keep bossCube within the basalt lava basin if it hits the far wall
+      if (bossPos.x > 12.6 && bossVel.x > 0) {
+        bossCubeBody.setLinvel({ x: -1.5, y: bossVel.y, z: bossVel.z * 0.5 }, true);
+      }
+    }
+  };
+
+  const updateVisuals = (elapsedSeconds: number) => {
+    for (const pair of syncPairs) {
+      const pos = pair.body.translation();
+      const rot = pair.body.rotation();
+      pair.mesh.position.set(pos.x, pos.y, pos.z);
+      pair.mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+    }
+
+    // Animate lava bubbles
+    for (const b of lavaBubbles) {
+      const s = 0.75 + 0.38 * Math.sin(elapsedSeconds * 4.2 + b.phase);
+      b.mesh.scale.set(s, s * 0.7, s);
+      b.mesh.position.y = 0.28 + 0.12 * Math.sin(elapsedSeconds * 3.1 + b.phase);
+    }
+
+    // Animate lava splash particles
+    const dt = 1 / 60;
+    for (let i = splashParticles.length - 1; i >= 0; i--) {
+      const p = splashParticles[i];
+      p.life += dt;
+      p.vel.y -= 12.0 * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      const scale = Math.max(0.01, 1 - p.life / p.maxLife);
+      p.mesh.scale.setScalar(scale);
+      if (p.life >= p.maxLife) {
+        p.mesh.visible = false;
+        splashParticles.splice(i, 1);
+      }
+    }
+  };
+
+  const checkGoalReached = (): boolean => {
+    const bossPos = bossCubeBody.translation();
+    const inPitRegion =
+      bossPos.x >= 3.8 &&
+      bossPos.x <= 13.5 &&
+      bossPos.y >= -0.5 &&
+      bossPos.y <= 3.0 &&
+      bossPos.z >= -5.2 &&
+      bossPos.z <= 5.2;
+    if (inPitRegion) {
+      bossInLavaFrames++;
+    } else {
+      bossInLavaFrames = 0;
+    }
+    return inPitRegion && bossInLavaFrames >= 6;
+  };
+
+  // ============================================================================
+  // 7. CONTROLS & HUMAN / BOT STEP FUNCTIONS
+  // ============================================================================
+  const controls: ControlBinding[] = [
+    { key: 'KeyW', action: 'Move North (-Z)' },
+    { key: 'KeyS', action: 'Move South (+Z)' },
+    { key: 'KeyA', action: 'Move West (-X)' },
+    { key: 'KeyD', action: 'Move East (+X)' },
+    { key: 'ArrowUp', action: 'Move North (-Z)' },
+    { key: 'ArrowDown', action: 'Move South (+Z)' },
+    { key: 'ArrowLeft', action: 'Move West (-X)' },
+    { key: 'ArrowRight', action: 'Move East (+X)' },
+    { key: 'Space', action: 'Jump / Hit Block / Stomp' },
+    { key: 'ShiftLeft', action: 'Siege Dash' },
+    { key: 'KeyF', action: 'Siege Slam / Fire Catapult' },
+  ];
+
+  const goal: LevelGoal = {
+    type: 'in-region',
+    body: 'bossCube',
+    min: [3.8, -0.5, -5.2],
+    max: [13.5, 3.0, 5.2],
+  };
+
+  const pressedCodes = new Set<string>();
+  let jumpRequested = false;
+  let dashRequested = false;
+  let slamRequested = false;
+  let lastDashTime = -10;
+
+  const codeFromKey = (key?: string): string => {
+    if (!key) return '';
+    const k = key.toLowerCase();
+    if (k === 'w') return 'KeyW';
+    if (k === 'a') return 'KeyA';
+    if (k === 's') return 'KeyS';
+    if (k === 'd') return 'KeyD';
+    if (k === 'f') return 'KeyF';
+    if (k === ' ') return 'Space';
+    if (k === 'shift') return 'ShiftLeft';
+    if (k === 'arrowup') return 'ArrowUp';
+    if (k === 'arrowdown') return 'ArrowDown';
+    if (k === 'arrowleft') return 'ArrowLeft';
+    if (k === 'arrowright') return 'ArrowRight';
+    return key;
+  };
+
+  const onPointerOrKey: NonNullable<MountedLevel['onPointerOrKey']> = (event) => {
+    const code = event.code || codeFromKey(event.key);
+    if (event.type === 'keydown') {
+      if (code) pressedCodes.add(code);
+      if (code === 'Space') jumpRequested = true;
+      if (code === 'ShiftLeft') dashRequested = true;
+      if (code === 'KeyF') slamRequested = true;
+    } else if (event.type === 'keyup') {
+      if (code) pressedCodes.delete(code);
+    } else if (event.type === 'pointerdown' || event.type === 'click') {
+      slamRequested = true;
+    }
+  };
+
+  const stepHumanAndRules = (_frameIndex: number, elapsedSeconds: number): StepResult => {
+    const pPos = playerBody.translation();
+    const pVel = playerBody.linvel();
+
+    let moveX = 0;
+    let moveZ = 0;
+    if (pressedCodes.has('KeyW') || pressedCodes.has('ArrowUp')) moveZ -= 1;
+    if (pressedCodes.has('KeyS') || pressedCodes.has('ArrowDown')) moveZ += 1;
+    if (pressedCodes.has('KeyA') || pressedCodes.has('ArrowLeft')) moveX -= 1;
+    if (pressedCodes.has('KeyD') || pressedCodes.has('ArrowRight')) moveX += 1;
+
+    const len = Math.hypot(moveX, moveZ);
+    const speed = 7.5;
+    let targetVx = pVel.x * 0.85;
+    let targetVz = pVel.z * 0.85;
+    if (len > 0) {
+      targetVx = (moveX / len) * speed;
+      targetVz = (moveZ / len) * speed;
+    }
+
+    let targetVy = pVel.y;
+    const isGrounded = pPos.y <= 0.95 && Math.abs(pVel.y) < 1.5;
+
+    if (jumpRequested) {
+      jumpRequested = false;
+      if (isGrounded) {
+        targetVy = 9.2;
+      }
+    }
+
+    if (dashRequested) {
+      dashRequested = false;
+      if (elapsedSeconds - lastDashTime >= 0.45) {
+        lastDashTime = elapsedSeconds;
+        const dx = len > 0 ? moveX / len : 1;
+        const dz = len > 0 ? moveZ / len : 0;
+        targetVx += dx * 11.0;
+        targetVz += dz * 11.0;
+      }
+    }
+
+    if (slamRequested) {
+      slamRequested = false;
+      // Siege Slam: downward stomp impulse + releases the catapult torsion latch
+      targetVy = -11.5;
+      if (!catapultLaunched) {
+        triggerCatapultLaunch(elapsedSeconds);
+      }
+    }
+
+    playerBody.setLinvel({ x: targetVx, y: targetVy, z: targetVz }, true);
+
+    evaluateContactsAndRules(elapsedSeconds);
+    updateVisuals(elapsedSeconds);
+
+    return {
+      botState: catapultLaunched ? 'human-catapult-fired' : 'human-active',
+      goalReached: checkGoalReached(),
+    };
+  };
+
+  let botJumpedTension = false;
+  let botJumpedPedal = false;
+
+  const stepBotAndRules = (_frameIndex: number, elapsedSeconds: number): StepResult => {
+    const pPos = playerBody.translation();
+    const pVel = playerBody.linvel();
+    let botState = 'approaching-tension-block';
+
+    if (!tensionCharged) {
+      // Step 1: Unobstructed run along z = 2.8 to (-13.5, _, 2.8) and jump to hit Tension Block from below
+      const dx = -13.5 - pPos.x;
+      const dz = 2.8 - pPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.42) {
+        playerBody.setLinvel(
+          { x: (dx / dist) * 8.2, y: pVel.y, z: (dz / dist) * 8.2 },
+          true,
+        );
+      } else {
+        botState = 'hitting-tension-block';
+        if (!botJumpedTension && pPos.y <= 0.95) {
+          botJumpedTension = true;
+          playerBody.setLinvel({ x: dx * 2.0, y: 9.2, z: dz * 2.0 }, true);
+        } else if (pPos.y <= 0.85 && Math.abs(pVel.y) < 0.6) {
+          playerBody.setLinvel({ x: dx * 2.0, y: 9.2, z: dz * 2.0 }, true);
+        }
+      }
+    } else if (!catapultLaunched) {
+      // Step 2: Dash east along z = 2.8 to Launch Pedal at (-10.2, _, 2.8), hop above it, and slam down
+      const dx = -10.2 - pPos.x;
+      const dz = 2.8 - pPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 1.15 && !botJumpedPedal) {
+        botState = 'dashing-to-launch-pedal';
+        playerBody.setLinvel(
+          { x: (dx / dist) * 10.5, y: pVel.y, z: (dz / dist) * 10.5 },
+          true,
+        );
+      } else {
+        botState = 'stomping-launch-pedal';
+        if (!botJumpedPedal && pPos.y <= 0.95) {
+          botJumpedPedal = true;
+          playerBody.setLinvel({ x: dx * 3.8, y: 7.6, z: dz * 3.8 }, true);
+        } else if (botJumpedPedal && (pPos.y > 1.25 || dist < 0.45) && pVel.y <= 2.2) {
+          // Execute downward Siege Slam onto the top of the pedal
+          playerBody.setLinvel({ x: dx * 4.5, y: -12.0, z: dz * 4.5 }, true);
+        } else if (botJumpedPedal && pPos.y <= 0.85 && Math.abs(pVel.y) < 0.5) {
+          botJumpedPedal = false;
+        }
+      }
+    } else {
+      // Step 3: Move to the lava pit overlook at (1.5, _, 2.8) to watch the bridge shatter and boss cube sink
+      botState = bridgeBroken ? 'boss-dropping-into-lava' : 'boulder-in-flight';
+      const dx = 1.5 - pPos.x;
+      const dz = 2.8 - pPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.4) {
+        playerBody.setLinvel(
+          { x: (dx / dist) * 6.5, y: pVel.y, z: (dz / dist) * 6.5 },
+          true,
+        );
+      } else {
+        playerBody.setLinvel({ x: 0, y: pVel.y, z: 0 }, true);
+      }
+    }
+
+    evaluateContactsAndRules(elapsedSeconds);
+    updateVisuals(elapsedSeconds);
+
+    return {
+      botState,
+      goalReached: checkGoalReached(),
+    };
+  };
+
+  const dispose = () => {
+    for (const joint of createdJoints) {
+      try {
+        world.removeImpulseJoint(joint, false);
+      } catch {
+        // Ignore if already removed
+      }
+    }
+    for (const body of createdBodies) {
+      try {
+        world.removeRigidBody(body);
+      } catch {
+        // Ignore if already removed
+      }
+    }
+    for (const obj of createdObjects) {
+      scene.remove(obj);
+    }
+    for (const d of disposables) {
+      d.dispose();
+    }
+    namedBodies.clear();
+  };
+
+  return {
+    dispose,
+    stepBotAndRules,
+    stepHumanAndRules,
+    controls,
+    goal,
+    onPointerOrKey,
+  };
+}
