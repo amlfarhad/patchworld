@@ -55,6 +55,38 @@ Return one JSON object only: {"files":[{"path":"src/generated/activeLevel.ts","c
 Include activeLevel.ts in every patch. Never use eval, Function, remote script loading, or write outside src/generated/.
 `
 
+const interactionKinds = new Map<string, 'model' | 'agent'>()
+
+export function extractInteractionText(interaction: {
+  output_text?: string | null
+  steps?: Array<{
+    type?: string
+    content?: Array<{ type?: string; text?: string }>
+  }>
+}): string {
+  const stepTexts: string[] = []
+  for (const step of interaction.steps ?? []) {
+    if (step.type !== 'model_output') continue
+    for (const part of step.content ?? []) {
+      if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+        stepTexts.push(part.text)
+      }
+    }
+  }
+  if (stepTexts.length > 0) return stepTexts.join('\n')
+  return interaction.output_text ?? ''
+}
+
+export function resolveChainedInteractionId(
+  previousInteractionId: string | undefined,
+  targetKind: 'model' | 'agent',
+): string | undefined {
+  if (!previousInteractionId) return undefined
+  const recordedKind = interactionKinds.get(previousInteractionId)
+  if (recordedKind && recordedKind !== targetKind) return undefined
+  return previousInteractionId
+}
+
 export class ArgonOrchestrator {
   private readonly ai: GoogleGenAI
 
@@ -77,8 +109,9 @@ export class ArgonOrchestrator {
       },
       system_instruction: 'You generate safe, typed Three.js and Rapier level modules for the Argon engine. Follow the output contract exactly.',
     })
+    interactionKinds.set(interaction.id, 'model')
     const completed = await this.waitForInteraction(interaction.id, 'Long-decode world generation')
-    return this.parseAndRepair(completed.output_text ?? '', interaction.id, validate, prompt)
+    return this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt)
   }
 
   async critiqueAndPatchWorld(
@@ -94,18 +127,20 @@ export class ArgonOrchestrator {
         config: { mimeType: 'video/webm' },
       })
       const prompt = `Inspect the attached browser playtest video and the frame telemetry. Diagnose the physics failure using video timestamps. Use sandbox code execution for numerical checks where useful; report actual tool results, never invented proofs. Return a complete patched file set and a skillContent Markdown document containing physical invariants learned from this run for .agents/SKILL.md.\nIteration: ${input.iteration}\nFailure: ${input.metadata.failureReason ?? 'Goal not reached'}\nTelemetry (${input.metadata.frameCount} frames):\n${JSON.stringify(input.metadata.telemetry)}\nCurrent generated files:\n${JSON.stringify(input.currentFiles)}\n\n${levelContract}`
+      const chainedAgentId = resolveChainedInteractionId(input.previousInteractionId, 'agent')
       const interaction = await this.ai.interactions.create({
         agent: managedAgent,
         environment: 'remote',
-        ...(input.previousInteractionId ? { previous_interaction_id: input.previousInteractionId } : {}),
+        ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
         input: [
           { type: 'video', uri: uploadedVideo.uri, mime_type: uploadedVideo.mimeType ?? 'video/webm' },
           { type: 'text', text: prompt },
         ],
         background: true,
       })
+      interactionKinds.set(interaction.id, 'agent')
       const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique')
-      return this.parseAndRepair(completed.output_text ?? '', interaction.id, validate, prompt)
+      return this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt)
     } finally {
       await rm(videoPath, { force: true })
     }
@@ -121,14 +156,17 @@ export class ArgonOrchestrator {
     let diagnostics = await validate(candidate.files)
     if (diagnostics.length > 0) {
       this.emit({ phase: 'typecheck-retry', message: 'TypeScript rejected the draft; sending diagnostics for one repair pass.' })
+      const chainedModelId = resolveChainedInteractionId(interactionId, 'model')
       const repair = await this.ai.interactions.create({
         model,
-        previous_interaction_id: interactionId,
+        background: true,
+        ...(chainedModelId ? { previous_interaction_id: chainedModelId } : {}),
         input: `${originalPrompt}\n\nCompiler diagnostics from the proposed files (repair once):\n${diagnostics.join('\n')}\nReturn the full corrected file set as the required JSON object.`,
         generation_config: { max_output_tokens: 65_536, thinking_level: 'high' },
       })
+      interactionKinds.set(repair.id, 'model')
       const completed = await this.waitForInteraction(repair.id, 'TypeScript repair pass')
-      candidate = parsePatch(completed.output_text ?? '')
+      candidate = parsePatch(extractInteractionText(completed))
       diagnostics = await validate(candidate.files)
       if (diagnostics.length > 0) throw new Error(`Generated TypeScript still fails after one repair pass:\n${diagnostics.join('\n')}`)
       interactionId = repair.id
