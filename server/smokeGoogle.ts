@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { GoogleGenAI } from '@google/genai'
 
 const apiKey = process.env.GEMINI_API_KEY
-if (!apiKey) throw new Error('GEMINI_API_KEY is missing from physics-sandbox/.env')
+if (!apiKey) throw new Error('GEMINI_API_KEY is missing; add it to .env in the project folder')
 
 const ai = new GoogleGenAI({ apiKey })
 const created = await ai.interactions.create({

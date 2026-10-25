@@ -1,5 +1,5 @@
 {
-  "name": "physics-sandbox",
+  "name": "patchworld",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,7 +13,8 @@
     "smoke:google": "node --import tsx server/smokeGoogle.ts",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "probe:live": "node --import tsx server/liveProbe.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

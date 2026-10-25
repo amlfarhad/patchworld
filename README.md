@@ -1,40 +1,73 @@
 # Patchworld
 
-An arcade-inspired physics playground with a persistent Three.js/Rapier viewport, generated levels, state-preserving Vite HMR, synchronized WebM and physics telemetry, and a localhost WebSocket broker. Prompt submissions use the configured Google generation and managed-agent APIs; the local dry-run needs no API credits.
+Describe a physical goal and Patchworld builds it as a playable 3D level, sends a bot in to play it, watches the recording when the bot fails, and rewrites the level live until the bot wins. Then you take the controls.
 
-## Interface
+The whole screen is one Three.js + Rapier physics canvas. Levels hot-swap into it without a page reload, so you watch each fix land in the same world.
 
-The React frontend uses Tailwind CSS, locally bundled Pixelify Sans/Sora/IBM Plex Mono fonts, and Lucide icons. `src/components/` contains the persistent viewport, prompt and three presets, live status ticker, replay card, Workshop drawer, and human controls. `src/hooks/useSandbox.ts` maps real engine and daemon events into UI state. The pixel island is an empty-state illustration and disappears when a level mounts.
+## The loop
 
-Take over cancels the autonomous run and exposes the generated level's human controls. Reset remounts the current module without replacing the renderer. Feature twists submit a revised world goal. The Workshop displays actual terminal events and published SKILL.md contents.
+1. **Generate.** Gemini writes the level as a TypeScript module (geometry, physics bodies, the bot's plan, the win rule). It's typechecked before it touches the screen.
+2. **Playtest.** The bot gets up to 8 seconds. The canvas is recorded to video, with physics telemetry alongside it.
+3. **Critique.** On a failure, the video goes back to Gemini. The critic's notes stream into the corner card, citing timestamps you can click to scrub the replay ("At 0:05 the boulder flies over the bridge…").
+4. **Patch.** Gemini edits the level code and the new version hot-swaps in. The bot tries again, up to four times.
+5. **Play.** Once the bot wins, take over: right-drag to orbit, the level's own keys to play, and a twist box to change the world ("make the cup slide back and forth"). Twists edit the current level rather than starting over.
 
-## Run locally
+The Workshop drawer (bottom left) shows the live log, a code diff for every iteration, the history of attempts with their replays, and the lessons the critic has learned so far.
+
+## Run it
+
+You need Node 22 or later.
+
+```bash
+npm install
+```
+
+**Demo mode (no API key, no cost).** Replays a scripted three-attempt Catapult run through the real loop: the bot fails twice, gets critiqued, gets patched, then wins.
+
+```bash
+npm run dev:mock
+```
+
+**Live mode.** Put your Gemini key in `.env`, then start the app.
+
+```text
+GEMINI_API_KEY=your-key
+```
 
 ```bash
 npm run dev
 ```
 
-This starts Vite (normally `http://localhost:5173`, or the next available port) and the sync daemon at `ws://127.0.0.1:4174`. Open the Vite page so the engine registers as a `browser` client. The canvas starts empty until a generated level adds scene objects. For live generation, configure `GEMINI_API_KEY=...` in a local `.env` file (plain assignments, not shell commands). Credentials remain server-side. Restart the daemon after editing its environment.
+Open the page Vite prints (normally http://localhost:5173) and keep the tab visible. Browsers pause animation in hidden tabs, so a playtest only runs while the page is on screen. Pick a preset or describe your own world.
 
-## Generated module contract
+Typical live timings: about 50 to 80 s for the first world, about 7 s for a video critique, and then the patch. Every live run is saved under `artifacts/runs/`. Replay any of them later, with no API calls, using `npm run dev:mock -- --mock=artifacts/runs/<folder>`.
 
-The entry module is `src/generated/activeLevel.ts` and exports `buildWorld(scene, world, namedBodies, eventQueue)`. It returns a `MountedLevel` with `stepBotAndRules(frameIndex, elapsedSeconds)` and `dispose()`, plus optional pointer/key handling. The host keeps the renderer, camera, scene lighting, and WebSocket connection while swapping the level and Rapier world.
+## Settings
 
-The daemon typechecks proposed `.ts` files against the current app in memory before writing any file. A failed check returns the formatted TypeScript diagnostics to the agent. Valid batches are staged as temporary files, moved into `src/generated/` with `activeLevel.ts` last, then Vite HMR remounts the module. The entry and its imported helpers are typechecked together.
+All optional, in `.env`:
 
-## Closed-loop playtest protocol
+| Setting | Default | What it does |
+|---|---|---|
+| `ARGON_MODEL` | `gemini-4-argon` | Model for every call |
+| `ARGON_WORLD_THINKING` | `medium` | Thinking effort for the first world |
+| `ARGON_PATCH_THINKING` / `ARGON_CRITIQUE_THINKING` | `low` | Thinking effort for patches and critiques |
+| `ARGON_MAX_ITERATIONS` | `4` | Attempts before the loop stops |
+| `ARGON_MOCK` | off | `1` or a fixture or run folder: replay instead of calling Gemini |
+| `ARGON_SYNC_PORT` / `VITE_ARGON_SYNC_URL` | `4174` | Move the local sync daemon off its default port |
 
-An agent registers with `{"type":"register","role":"agent"}` and starts a run with `{"type":"start-playtest","maxFrames":240}`. The browser runs up to 480 physics ticks at 60 Hz and records 240 telemetry samples plus canvas video at 30 FPS (eight seconds). On a failed run, it sends a binary WebSocket packet containing a four-byte JSON-header length, the `PLAYTEST_FAILED_PAYLOAD` metadata and frame ledger, then the WebM bytes. The daemon stores the artifact locally and forwards the packet to connected agents.
+## How it fits together
 
-The agent returns a patch using `{"type":"write-files","runId":"...","files":[{"path":"src/generated/activeLevel.ts","content":"..."}]}`. The daemon checks it before writing. A valid HMR mount automatically starts the next run. A successful run returns `playtest-passed` to connected agents. Contact-force telemetry requires generated colliders to enable `RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS`.
+- `src/engine/`: the persistent engine. It mounts each generated level into a fresh Rapier world, frames the camera to it, runs the bot at a fixed 60 Hz and records playtests.
+- `server/syncDaemon.ts`: the local WebSocket broker. It drives the loop, typechecks generated files before writing them into `src/generated/`, and tracks the history of attempts.
+- `server/argonOrchestrator.ts`: the Gemini side. It runs streamed calls, sends the video inline, keeps the critique and the patch as separate calls, applies find-and-replace edits (falling back to whole files), and repairs levels that crash on load.
+- `src/generated/activeLevel.ts`: the level contract. It exports `buildWorld(scene, world, namedBodies, eventQueue)`, returning `stepBotAndRules`, an optional `stepHumanAndRules` and `onPointerOrKey`, and `dispose`. See `src/engine/types.ts`.
 
-## Verify locally
+The API key stays in the daemon. The browser only ever sees goals, progress, video and code.
+
+## Checks
 
 ```bash
 npm test
 npm run build
+npm run probe:live   # one real world generation, timed, no browser needed
 ```
-
-With `npm run dev` running and the browser page open, `npm run dry-run` pushes a temporary two-file level, captures a 240-sample failure, sends a successful patch through HMR, and restores the starter level and removes its artifacts.
-
-Failed video and ledger artifacts are stored under the ignored `artifacts/playtests/` directory for real runs. The dry-run removes its own artifacts and temporary generated modules when it finishes.
