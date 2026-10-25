@@ -21,6 +21,7 @@ export class EngineHost {
   private world: RAPIER.World | null = null
   private levelHandle: MountedLevel | null = null
   private levelRoot: THREE.Group | null = null
+  private stageRoot: THREE.Group | null = null
   private unsubscribeLoopState: (() => void) | null = null
   private animationFrame = 0
   private frameIndex = 0
@@ -38,6 +39,8 @@ export class EngineHost {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     this.camera.position.set(0, 3, 8)
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
@@ -48,7 +51,7 @@ export class EngineHost {
     this.unsubscribeLoopState = this.autonomousLoop.onStateChange(() => {
       this.controls.enabled = this.autonomousLoop.isHumanControlled
     })
-    this.scene.add(new THREE.HemisphereLight(0xdceeff, 0x27313a, 2))
+    this.setupDefaultStage()
     this.resize()
     window.addEventListener('resize', this.resize)
   }
@@ -95,6 +98,8 @@ export class EngineHost {
       }
       const newObjects = this.scene.children.filter((child) => !existingChildren.has(child))
       if (newObjects.length > 0) nextRoot.add(...newObjects)
+      this.enableLevelShadows(nextRoot)
+      this.createDefaultGroundCollider(nextWorld)
       this.scene.add(nextRoot)
     } catch (error) {
       const additions = this.scene.children.filter((child) => !existingChildren.has(child))
@@ -153,9 +158,113 @@ export class EngineHost {
     this.unsubscribeLoopState = null
     this.controls.dispose()
     this.clearCurrentLevel()
+    if (this.stageRoot) {
+      this.scene.remove(this.stageRoot)
+      this.disposeObjectTree(this.stageRoot)
+      this.stageRoot = null
+    }
     this.autonomousLoop.dispose()
     this.eventQueue?.free()
     this.renderer.dispose()
+  }
+
+  private setupDefaultStage(): void {
+    const stage = new THREE.Group()
+    stage.name = 'default-stage'
+
+    // Sky dome with smooth gradient
+    const skyGeo = new THREE.SphereGeometry(240, 32, 16)
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {
+        topColor: { value: new THREE.Color(0x9bd3f8) },
+        horizonColor: { value: new THREE.Color(0xeaf3e9) },
+        bottomColor: { value: new THREE.Color(0xd2e4d0) },
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPosition.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 horizonColor;
+        uniform vec3 bottomColor;
+        varying vec3 vWorldPos;
+        void main() {
+          float h = normalize(vWorldPos).y;
+          vec3 col = h >= 0.0
+            ? mix(horizonColor, topColor, pow(clamp(h, 0.0, 1.0), 0.65))
+            : mix(horizonColor, bottomColor, pow(clamp(-h, 0.0, 1.0), 0.65));
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+    })
+    const skyDome = new THREE.Mesh(skyGeo, skyMat)
+    skyDome.name = 'default-sky'
+    stage.add(skyDome)
+
+    // Hemisphere + Directional light with shadows
+    const hemiLight = new THREE.HemisphereLight(0xdceeff, 0x3b4d3f, 1.4)
+    stage.add(hemiLight)
+
+    const sunLight = new THREE.DirectionalLight(0xfff7e8, 2.2)
+    sunLight.position.set(18, 32, 20)
+    sunLight.castShadow = true
+    sunLight.shadow.mapSize.set(2048, 2048)
+    sunLight.shadow.camera.near = 1
+    sunLight.shadow.camera.far = 120
+    const shadowExtent = 35
+    sunLight.shadow.camera.left = -shadowExtent
+    sunLight.shadow.camera.right = shadowExtent
+    sunLight.shadow.camera.top = shadowExtent
+    sunLight.shadow.camera.bottom = -shadowExtent
+    sunLight.shadow.bias = -0.0005
+    stage.add(sunLight)
+
+    // Visual ground slab at y = -0.25 (top surface at y = 0)
+    const groundGeo = new THREE.BoxGeometry(120, 0.5, 120)
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0xdbe7d8,
+      roughness: 0.9,
+      metalness: 0.04,
+    })
+    const groundMesh = new THREE.Mesh(groundGeo, groundMat)
+    groundMesh.position.set(0, -0.25, 0)
+    groundMesh.receiveShadow = true
+    groundMesh.name = 'default-ground'
+    stage.add(groundMesh)
+
+    const grid = new THREE.GridHelper(120, 60, 0x99b399, 0xc3d6c2)
+    grid.position.set(0, 0.004, 0)
+    stage.add(grid)
+
+    this.stageRoot = stage
+    this.scene.add(stage)
+  }
+
+  private createDefaultGroundCollider(world: RAPIER.World): void {
+    const groundBody = world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.25, 0),
+    )
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(60, 0.25, 60).setFriction(0.8).setRestitution(0.2),
+      groundBody,
+    )
+  }
+
+  private enableLevelShadows(root: THREE.Object3D): void {
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh
+      if (mesh.isMesh) {
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+      }
+    })
   }
 
   private frameLevelBounds(): void {
