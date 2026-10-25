@@ -8,6 +8,7 @@ import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
 import type { GeneratedFile } from './generatedFiles.ts'
 import type { MountFailureInput, TwistInput, ValidateFiles, WorldEvent, WorldOrchestrator } from './orchestrator.ts'
 import { compactTelemetry } from './telemetry.ts'
+import { applyEdits, mergePatchFiles, type FileEdit } from './patchEdits.ts'
 
 const model = process.env.ARGON_MODEL ?? 'gemini-4-argon'
 /** Thinking effort per call. The first world benefits from more; patches and critiques need speed. */
@@ -89,7 +90,30 @@ const patchSchema = {
 
 const patchFormat = { type: 'text', mime_type: 'application/json', schema: patchSchema } as const
 
-const outputInstructions = `Return one JSON object: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"one or two sentences on what this version changes","skillContent":"Markdown list of physical invariants learned so far, or empty"}. Include activeLevel.ts in every response with its complete content.`
+const editSchema = {
+  type: 'object',
+  properties: {
+    edits: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { path: { type: 'string' }, find: { type: 'string' }, replace: { type: 'string' } },
+        required: ['path', 'find', 'replace'],
+      },
+    },
+    files: patchSchema.properties.files,
+    diagnosis: { type: 'string' },
+    skillContent: { type: 'string' },
+  },
+  required: ['edits', 'files', 'diagnosis', 'skillContent'],
+}
+
+const editFormat = { type: 'text', mime_type: 'application/json', schema: editSchema } as const
+
+const editInstructions = `Return one JSON object: {"edits":[{"path":"src/generated/activeLevel.ts","find":"exact current code","replace":"new code"}],"files":[],"diagnosis":"one or two sentences on what this version changes","skillContent":"Markdown list of physical invariants learned so far, or empty"}.
+Each "find" must be copied exactly from the current file (whitespace included) and appear in it exactly once; include a few surrounding lines to make it unique. Keep edits small. Put only brand-new files in "files", whole.`
+
+const outputInstructions =`Return one JSON object: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"one or two sentences on what this version changes","skillContent":"Markdown list of physical invariants learned so far, or empty"}. Include activeLevel.ts in every response with its complete content.`
 
 const systemInstruction = 'You write safe, typed Three.js and Rapier physics levels for the Patchworld engine. Follow the host contract exactly and return only the requested JSON.'
 
@@ -100,7 +124,8 @@ interface StreamOptions {
   input: InteractionInput
   thinking: string
   previousInteractionId?: string
-  json?: boolean
+  /** Structured JSON output format; omitted for plain text. */
+  format?: typeof patchFormat | typeof editFormat
   onText?: (text: string) => void
 }
 
@@ -117,8 +142,8 @@ export class ArgonOrchestrator implements WorldOrchestrator {
     const skill = await readLearnedSkill()
     const prompt = `Create a complete physics sandbox level for this goal: ${goal}\n${skill ? `\nPhysical invariants learned from earlier runs:\n${skill}\n` : ''}\n${levelContract}\n${outputInstructions}`
     this.emit({ phase: 'synthesizing', message: 'Synthesizing the first physics world…' })
-    const result = await this.stream({ label: 'World generation', input: prompt, thinking: worldThinking, json: true })
-    return this.parseAndRepair(result.text, result.id, validate)
+    const result = await this.stream({ label: 'World generation', input: prompt, thinking: worldThinking, format: patchFormat })
+    return this.parseAndRepair(parsePatch(result.text), result.id, validate)
   }
 
   async critiqueAndPatchWorld(input: FailedRunInput, validate: ValidateFiles): Promise<GeneratedPatch> {
@@ -145,8 +170,9 @@ Diagnose why the goal was not reached. Cite video timestamps (for example "At 0:
     const patch = await this.patch({
       label: 'Patch',
       previousInteractionId: critiqueResult.id,
-      prompt: `Apply your diagnosis to the current level code and return the corrected level. Prefer the smallest change that fixes the failure; keep everything that already works.\n${levelContract}\n${outputInstructions}`,
+      prompt: `Apply your diagnosis to the current level code. Prefer the smallest change that fixes the failure; keep everything that already works.\n${levelContract}`,
       iteration: input.iteration,
+      currentFiles: input.currentFiles,
     }, validate)
     return { ...patch, diagnosis: critique || patch.diagnosis }
   }
@@ -161,10 +187,10 @@ Error: ${input.error}
 ${input.stack ? `Stack:\n${input.stack}\n` : ''}Current level code:
 ${formatFiles(input.currentFiles)}
 
-Fix the cause of the error and return the corrected level. Keep the design otherwise unchanged.
-${levelContract}
-${outputInstructions}`,
+Fix the cause of the error. Keep the design otherwise unchanged.
+${levelContract}`,
       iteration: input.iteration,
+      currentFiles: input.currentFiles,
     }, validate)
   }
 
@@ -178,29 +204,50 @@ Add this twist to it: ${input.twist}
 Change the existing level rather than starting over, and keep the bot able to reach the (possibly updated) goal.
 Current level code:
 ${formatFiles(input.currentFiles)}
-${levelContract}
-${outputInstructions}`,
+${levelContract}`,
       iteration: 0,
+      currentFiles: input.currentFiles,
     }, validate)
   }
 
+  /** Asks for targeted edits to the current files; falls back to one whole-file pass when an edit does not apply. */
   private async patch(
-    request: { label: string; prompt: string; previousInteractionId?: string; iteration: number },
+    request: { label: string; prompt: string; previousInteractionId?: string; iteration: number; currentFiles: GeneratedFile[] },
     validate: ValidateFiles,
   ): Promise<GeneratedPatch> {
-    this.emit({ phase: 'thinking', message: `${request.label}: rewriting the level…`, iteration: request.iteration })
+    this.emit({ phase: 'thinking', message: `${request.label}: editing the level…`, iteration: request.iteration })
     const result = await this.stream({
       label: request.label,
-      input: request.prompt,
+      input: `${request.prompt}\n${editInstructions}`,
       thinking: patchThinking,
       previousInteractionId: request.previousInteractionId,
-      json: true,
+      format: editFormat,
     })
-    return this.parseAndRepair(result.text, result.id, validate)
+    const parsed = parseEditPatch(result.text)
+    const { files: edited, errors } = applyEdits(request.currentFiles, parsed.edits)
+    if (errors.length > 0 || (parsed.edits.length === 0 && parsed.files.length === 0)) {
+      const reason = errors.length > 0 ? errors.join('\n') : 'The response contained no edits.'
+      console.log(`[Argon] ${request.label} edits did not apply; asking for whole files:\n${reason}`)
+      this.emit({ phase: 'thinking', message: `${request.label}: an edit did not match the code; asking for the whole file instead.`, iteration: request.iteration })
+      const whole = await this.stream({
+        label: `${request.label} (whole file)`,
+        input: `Your edits could not be applied:\n${reason}\nReturn the complete corrected files instead.\n${outputInstructions}`,
+        thinking: patchThinking,
+        previousInteractionId: result.id,
+        format: patchFormat,
+      })
+      return this.parseAndRepair(parsePatch(whole.text), whole.id, validate)
+    }
+    const files = mergePatchFiles(request.currentFiles, edited, parsed.files)
+    return this.parseAndRepair({ files, diagnosis: parsed.diagnosis, skillContent: parsed.skillContent }, result.id, validate)
   }
 
-  private async parseAndRepair(output: string, interactionId: string, validate: ValidateFiles): Promise<GeneratedPatch> {
-    let candidate = parsePatch(output)
+  private async parseAndRepair(
+    first: { files: GeneratedFile[]; diagnosis?: string; skillContent?: string },
+    interactionId: string,
+    validate: ValidateFiles,
+  ): Promise<GeneratedPatch> {
+    let candidate = first
     let diagnostics = await validate(candidate.files)
     if (diagnostics.length > 0) {
       console.log(`[Argon] TypeScript rejected the draft:\n${diagnostics.join('\n').replace(/\x1b\[[0-9;]*m/g, '').slice(0, 3_000)}`)
@@ -210,7 +257,7 @@ ${outputInstructions}`,
         input: `The files you returned fail to compile:\n${diagnostics.join('\n')}\nReturn the full corrected file set.\n${outputInstructions}`,
         thinking: patchThinking,
         previousInteractionId: interactionId,
-        json: true,
+        format: patchFormat,
       })
       candidate = parsePatch(repair.text)
       diagnostics = await validate(candidate.files)
@@ -229,7 +276,7 @@ ${outputInstructions}`,
       input: options.input as never,
       system_instruction: systemInstruction,
       generation_config: { thinking_level: options.thinking, max_output_tokens: 65_536 },
-      ...(options.json ? { response_format: patchFormat } : {}),
+      ...(options.format ? { response_format: options.format } : {}),
       ...(options.previousInteractionId ? { previous_interaction_id: options.previousInteractionId } : {}),
     }, { timeout_ms: callTimeoutMs })
 
@@ -253,7 +300,7 @@ ${outputInstructions}`,
         if (event.delta.type === 'text') {
           text += event.delta.text
           options.onText?.(text)
-          progress(options.json ? `writing level code, ${(text.length / 1000).toFixed(1)}k characters` : 'writing')
+          progress(options.format ? `writing level code, ${(text.length / 1000).toFixed(1)}k characters` : 'writing')
         } else if (event.delta.type === 'thought_summary') {
           progress('thinking')
         }
@@ -324,6 +371,35 @@ export function parsePatch(output: string): { files: GeneratedFile[]; diagnosis?
     return { path: entry.path, content: entry.content }
   })
   return {
+    files,
+    diagnosis: typeof value.diagnosis === 'string' ? value.diagnosis : undefined,
+    skillContent: typeof value.skillContent === 'string' ? value.skillContent.slice(0, 64000) : undefined,
+  }
+}
+
+export function parseEditPatch(output: string): { edits: FileEdit[]; files: GeneratedFile[]; diagnosis?: string; skillContent?: string } {
+  const start = output.indexOf('{')
+  const end = output.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('Model returned no JSON edit patch')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output.slice(start, end + 1))
+  } catch (error) {
+    throw new Error(`Model returned invalid edit JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const value = (parsed ?? {}) as { edits?: unknown; files?: unknown; diagnosis?: unknown; skillContent?: unknown }
+  const edits = (Array.isArray(value.edits) ? value.edits : []).map((edit, index) => {
+    const entry = (edit ?? {}) as { path?: unknown; find?: unknown; replace?: unknown }
+    if (typeof entry.path !== 'string' || typeof entry.find !== 'string' || typeof entry.replace !== 'string') {
+      throw new Error(`Edit ${index + 1} needs path, find and replace strings`)
+    }
+    return { path: entry.path, find: entry.find, replace: entry.replace }
+  })
+  const files = Array.isArray(value.files) && value.files.length > 0
+    ? parsePatch(JSON.stringify({ files: value.files })).files
+    : []
+  return {
+    edits,
     files,
     diagnosis: typeof value.diagnosis === 'string' ? value.diagnosis : undefined,
     skillContent: typeof value.skillContent === 'string' ? value.skillContent.slice(0, 64000) : undefined,

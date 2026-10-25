@@ -4,6 +4,8 @@ import * as THREE from 'three'
 const maxFramedRadius = 25
 /** Share of the viewport height kept clear at the bottom for the HUD. */
 const hudReserve = 0.3
+/** Share of the viewport width on the right kept clear for the replay card. */
+const sideReserve = 0.26
 const padding = 1.6
 /** Camera looks at the level from the front and a little above. */
 const viewDirection = new THREE.Vector3(0, 0.32, 1).normalize()
@@ -39,11 +41,13 @@ export function frameBox(camera: THREE.PerspectiveCamera, box: THREE.Box3): THRE
   const halfHeight = Math.max(size.y, size.z * 0.35, 1) / 2
   const halfWidth = Math.max(size.x, 1) / 2
   const distanceForHeight = halfHeight / (Math.tan(verticalFov / 2) * usableHeight)
-  const distanceForWidth = halfWidth / (Math.tan(verticalFov / 2) * camera.aspect)
+  const distanceForWidth = halfWidth / (Math.tan(verticalFov / 2) * camera.aspect * (1 - sideReserve))
   const distance = Math.max(distanceForHeight, distanceForWidth) * padding + size.z / 2
   // Aim below the centre so the level sits in the upper part of the frame, clear of the HUD.
   const target = center.clone()
   target.y -= Math.tan(verticalFov / 2) * distance * hudReserve
+  // Aim right of the centre so the level sits left of the replay card.
+  target.x += Math.tan(verticalFov / 2) * camera.aspect * distance * sideReserve
   camera.position.copy(target).addScaledVector(viewDirection, distance)
   camera.near = Math.max(0.05, distance / 200)
   camera.far = Math.max(500, distance * 20)
