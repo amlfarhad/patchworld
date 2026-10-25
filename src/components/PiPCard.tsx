@@ -1,28 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode, type UIEvent } from 'react'
-import { ChevronDown, ChevronUp, Clapperboard, ScanLine, MessageSquareText, CircleCheck, ScanEye, Columns2, X, Check } from 'lucide-react'
+import { useEffect, useRef, useState, type UIEvent } from 'react'
+import { ChevronDown, ChevronUp, Clapperboard, ScanLine, MessageSquareText, CircleCheck, ScanEye, Columns2, X, Check, Maximize2 } from 'lucide-react'
 import type { Critique, SandboxState } from '../hooks/useSandbox'
 import { ComparePanel } from './ComparePanel'
+import { CritiqueText } from './CritiqueText'
+import { ReplayTimeline } from './ReplayTimeline'
 
 const pad = (n: number) => String(n).padStart(2, '0')
-const TIMESTAMP = /\b(\d{1,2}):([0-5]\d)(?:\.(\d+))?\b/g
 const LABELS: Record<Critique['status'], string> = { idle: 'BUILDER NOTES', watching: 'AGENT IS WATCHING', streaming: 'CRITIQUE', done: 'DIAGNOSIS' }
-
-/** Renders critique text with the video timestamps the agent cites ("At 0:03 …") as buttons that seek the replay. */
-function CritiqueText({ text, onSeek }: { text: string; onSeek: (seconds: number) => void }) {
-  const parts: ReactNode[] = []
-  let last = 0
-  for (const match of text.matchAll(TIMESTAMP)) {
-    const seconds = Number(match[1]) * 60 + Number(match[2]) + Number(`0.${match[3] ?? 0}`)
-    parts.push(text.slice(last, match.index), <button key={match.index} type="button" className="time-chip" onClick={() => onSeek(seconds)} aria-label={`Jump replay to ${match[0]}`}>{match[0]}</button>)
-    last = match.index + match[0].length
-  }
-  parts.push(text.slice(last))
-  return <>{parts}</>
-}
 
 export function PiPCard({ state }: { state: SandboxState }) {
   const [open, setOpen] = useState(false)
   const [comparing, setComparing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const expandRef = useRef<HTMLButtonElement>(null)
   // An older attempt picked from the strip; a newer attempt arriving switches back to the latest.
   const [pick, setPick] = useState<{ runId: string; latest: string } | null>(null)
   const replay = state.replay
@@ -44,10 +34,10 @@ export function PiPCard({ state }: { state: SandboxState }) {
   const notes = past ? (shown.failed ? state.critiques[shown.iteration] || shown.failureReason || 'No critique was recorded for this attempt.' : 'Goal reached on this attempt.')
     : critique.status === 'idle' ? (replay && !replay.failed ? 'Goal reached on this attempt.' : replay?.failureReason || 'Every attempt teaches the builder something new.') : critique.text
   return <aside className={`pip-panel glass-panel ${open && (replay || critique.status !== 'idle') ? 'pip-open' : ''} ${shown?.failed ? 'pip-failed' : ''}`} aria-label="Playtest replay and critique">
-    <button className="pip-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="replay-content">
+    <div className="pip-head"><button className="pip-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="replay-content">
       <span className="flex items-center gap-2.5"><Clapperboard size={15} /><span className="micro-label">INSTANT REPLAY</span></span>
       <span className="flex items-center gap-2"><span className="replay-count">{shown ? `ITER ${pad(shown.iteration)}${state.maxIterations ? ` / ${pad(state.maxIterations)}` : ''}` : 'NO REPLAYS YET'}</span>{open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}</span>
-    </button>
+    </button>{state.replays.length > 0 && <button ref={expandRef} type="button" className="pip-expand" onClick={() => setExpanded(true)} aria-label="Expand: every attempt with its critique and fix" title="Every attempt"><Maximize2 size={14} /></button>}</div>
     {open && <div id="replay-content">
       {shown ? <div className="replay-video-wrap"><video ref={videoRef} key={shown.runId} src={shown.videoUrl} autoPlay loop controls muted playsInline aria-label={`Recorded bot attempt ${shown.iteration}`} /><span className={`replay-result ${shown.failed ? '' : 'passed'}`}>{shown.failed ? <ScanLine size={11} /> : <CircleCheck size={11} />}{shown.failed ? 'FAILED ATTEMPT' : 'GOAL REACHED'}</span></div> : <div className="replay-empty"><ScanLine size={27} strokeWidth={1} /><span>No attempts recorded yet.</span><small>The next bot run will appear here.</small></div>}
       {state.replays.length > 1 && <div className="attempt-strip">
@@ -62,6 +52,7 @@ export function PiPCard({ state }: { state: SandboxState }) {
         </p>
       </div>
     </div>}
+    {expanded && <ReplayTimeline state={state} onClose={() => { setExpanded(false); expandRef.current?.focus() }} />}
     {comparing && draft && winner && <ComparePanel draft={draft} winner={winner} draftNotes={state.critiques[draft.iteration] || draft.failureReason || ''} onClose={() => setComparing(false)} />}
   </aside>
 }

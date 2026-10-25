@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ControlBinding, LevelGoal } from '../engine/types'
+import { advanceStage, type BuildCycle } from '../components/buildStages'
 
 export interface AgentLog { id: number; timestamp: string; message: string; kind: 'activity' | 'terminal' | 'error' }
 /** The agent's critique of the latest failed attempt. `streaming` text grows as `critique-text` updates arrive. */
@@ -21,6 +22,8 @@ export interface SandboxState {
   skillContent: string; skillUpdated: string; goal: string; error: string; human: boolean;
   /** The daemon replays a scripted run (mock mode) instead of calling Gemini. */
   mock: boolean;
+  /** The world or patch being built right now, and how long earlier patch cycles took (seconds), for the progress estimate. */
+  build: BuildCycle | null; patchSeconds: number[];
 }
 type ProgressDetail = { phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
 const idleCritique: Critique = { iteration: 0, text: '', status: 'idle', updatedAt: '' }
@@ -28,6 +31,7 @@ const initial: SandboxState = {
   connected: false, ready: false, hasLevel: false, phase: 'idle', message: 'Ready for your first world',
   frame: 0, frameLimit: 240, bodyCount: 0, iteration: 0, diagnosis: '', diagnosisTime: '',
   critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, controls: [], levelGoal: null, levelMounts: 0, humanResult: null, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false, mock: false,
+  build: null, patchSeconds: [],
 }
 
 // Daemons that only send the final `diagnosis` still drive the critique: `critiquing` means the agent is watching the replay.
@@ -73,12 +77,12 @@ export function useSandbox() {
     listen<{ reason?: string } | undefined>('argon:human-lost', (d) => setState((s) => (s.human && !s.humanResult ? { ...s, humanResult: { outcome: 'lost', reason: d?.reason } } : s)))
     listen<{ frame: number; total: number; bodyCount: number }>('argon:frame', (d) => setState((s) => ({ ...s, phase: 'running', frame: d.frame, frameLimit: d.total, bodyCount: d.bodyCount })))
     listen<ProgressDetail>('argon:progress', (d) => {
-      setState((s) => { const critique = critiqueFromProgress(s.critique, d, s.iteration); return {
+      setState((s) => { const critique = critiqueFromProgress(s.critique, d, s.iteration); const build = d.terminal ? s.build : advanceStage(s.build, d.phase, critique.status === 'done'); return {
         ...s, phase: d.terminal ? s.phase : d.skillContent ? (s.phase === 'idle' ? 'idle' : 'skill-evolving') : d.phase === 'hmr-swapped' && !s.hasLevel ? 'idle' : d.phase === 'thinking' && s.phase === 'critiquing' ? s.phase : d.phase,
         message: d.message, iteration: d.iteration ?? s.iteration, maxIterations: d.maxIterations ?? s.maxIterations,
         diagnosis: d.diagnosis ?? s.diagnosis, diagnosisTime: d.diagnosis ? d.timestamp : s.diagnosisTime, critique, critiques: remember(s.critiques, critique),
         skillContent: d.skillContent ?? s.skillContent, skillUpdated: d.skillContent ? d.timestamp : s.skillUpdated,
-        error: d.phase === 'error' ? d.message : s.error,
+        error: d.phase === 'error' ? d.message : s.error, build: d.phase === 'error' || d.phase === 'limit-reached' ? null : build,
         logs: log(s, d.terminal ?? d.message, d.terminal ? 'terminal' : d.phase === 'error' ? 'error' : 'activity', d.timestamp),
       } })
     })
@@ -87,19 +91,28 @@ export function useSandbox() {
       const c = s.critique
       if (d.iteration < c.iteration || (d.iteration === c.iteration && c.status === 'done' && !d.final)) return s
       const critique: Critique = { iteration: d.iteration, text: d.text, status: d.final ? 'done' : 'streaming', updatedAt: d.timestamp }
-      return { ...s, critique, critiques: remember(s.critiques, critique) }
+      return { ...s, critique, critiques: remember(s.critiques, critique), build: d.final ? advanceStage(s.build, 'patching', true) : s.build }
     }))
     // Browsers get each patch's full before/after text on `patch-applied`; keep the last dozen for the Code tab.
+    // The daemon sends it before counting the new attempt (0 for the first world), so the attempt this code becomes is one more.
     listen<{ iteration?: number; changes?: FileChange[] }>('argon:patch-applied', ({ iteration, changes }) => {
-      if (changes?.length) setState((s) => ({ ...s, code: [...s.code.slice(-11), { iteration: iteration ?? s.iteration, timestamp: new Date().toISOString(), changes }] }))
+      if (changes?.length) setState((s) => ({ ...s, build: advanceStage(s.build, 'patched', true), code: [...s.code.slice(-11), { iteration: (iteration ?? s.iteration) + 1, timestamp: new Date().toISOString(), changes }] }))
     })
-    listen<string>('argon:playtest-state', (phase) => setState((s) => ({ ...s, phase, human: phase === 'human' || phase === 'complete', frame: phase === 'running' ? 0 : s.frame, iteration: phase === 'running' ? Math.max(1, s.iteration) : s.iteration })))
+    listen<string>('argon:playtest-state', (phase) => setState((s) => ({
+      ...s, phase, human: phase === 'human' || phase === 'complete', frame: phase === 'running' ? 0 : s.frame, iteration: phase === 'running' ? Math.max(1, s.iteration) : s.iteration,
+      // Taking over or winning ends the build; a bot run is its last stage.
+      build: phase === 'human' || phase === 'complete' ? null : phase === 'running' || phase === 'uploading' ? advanceStage(s.build, 'recording', true) : s.build,
+    })))
     listen<Omit<Replay, 'iteration'>>('argon:video-preview', (incoming) => {
       videoUrls.push(incoming.videoUrl)
       if (videoUrls.length > MAX_REPLAYS) URL.revokeObjectURL(videoUrls.shift() ?? '')
       setState((s) => {
         const replay = { ...incoming, iteration: Math.max(1, s.iteration) }
-        return { ...s, replay, replays: [...s.replays, replay].slice(-MAX_REPLAYS), critique: { ...idleCritique, iteration: s.critique.iteration } }
+        // An attempt's video ends its build cycle; a failed one starts the critique-and-patch cycle for the next attempt.
+        const now = Date.now()
+        const patchSeconds = s.build && s.build.kind !== 'world' ? [...s.patchSeconds, (now - s.build.startedAt) / 1000].slice(-6) : s.patchSeconds
+        const build: BuildCycle | null = incoming.failed ? { kind: 'patch', startedAt: now, attempt: replay.iteration + 1, stage: 'critique' } : null
+        return { ...s, replay, replays: [...s.replays, replay].slice(-MAX_REPLAYS), critique: { ...idleCritique, iteration: s.critique.iteration }, build, patchSeconds }
       })
     })
     listen<string | { goal: string; twist: boolean }>('argon:goal-submitted', (detail) => {
@@ -109,13 +122,14 @@ export function useSandbox() {
       if (!twist) videoUrls.splice(0).forEach((url) => URL.revokeObjectURL(url))
       setState((s) => ({
         ...s, error: '', phase: 'synthesizing', human: false, diagnosis: '', diagnosisTime: '', critique: idleCritique, frame: 0,
+        build: twist ? { kind: 'twist', startedAt: Date.now(), attempt: s.iteration + 1, stage: 'patch' } : { kind: 'world', startedAt: Date.now(), attempt: 1, stage: 'generate' },
         ...(twist
           ? { goal: s.goal ? `${s.goal} (twist: ${text})` : text }
           : { goal: text, code: [], replay: null, replays: [], critiques: {}, iteration: 0 }),
       }))
     })
-    listen<string>('argon:goal-error', (error) => setState((s) => ({ ...s, error, phase: 'error', logs: log(s, error, 'error') })))
-    listen<{ diagnostics: string }>('argon:patch-rejected', (d) => setState((s) => ({ ...s, error: d.diagnostics, phase: 'error', logs: log(s, d.diagnostics, 'error') })))
+    listen<string>('argon:goal-error', (error) => setState((s) => ({ ...s, error, phase: 'error', build: null, logs: log(s, error, 'error') })))
+    listen<{ diagnostics: string }>('argon:patch-rejected', (d) => setState((s) => ({ ...s, error: d.diagnostics, phase: 'error', build: null, logs: log(s, d.diagnostics, 'error') })))
     return () => { bindings.forEach(([name, handler]) => window.removeEventListener(name, handler)); videoUrls.forEach((url) => URL.revokeObjectURL(url)) }
   }, [])
   return state
