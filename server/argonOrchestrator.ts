@@ -88,16 +88,26 @@ export interface FailedRunInput {
 
 export interface MountFailureInput {
   error: string
+  stack?: string
   currentFiles: GeneratedFile[]
   previousInteractionId?: string
   iteration: number
 }
 
-export interface ReviseWorldInput {
+export interface TwistInput {
+  goal: string
+  twist: string
+  currentFiles: GeneratedFile[]
+  previousInteractionId?: string
+}
+
+export type ReviseWorldInput = TwistInput | {
+  goal?: string
+  twist?: string
   instruction: string
   currentFiles: GeneratedFile[]
   previousInteractionId?: string
-  iteration: number
+  iteration?: number
 }
 
 export const levelContract = `
@@ -463,7 +473,7 @@ export class ArgonOrchestrator {
         { type: 'text', text: critiquePrompt },
       ],
       generation_config: {
-        max_output_tokens: 2_048,
+        max_output_tokens: 4_096,
         thinking_level: 'low',
       },
     })
@@ -472,20 +482,32 @@ export class ArgonOrchestrator {
     if (response && typeof (response as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function') {
       for await (const chunk of response as AsyncIterable<{
         event_type?: string
-        delta?: { content?: Array<{ type?: string; text?: string }> }
+        delta?: {
+          type?: string
+          text?: string
+          content?: Array<{ type?: string; text?: string }>
+        }
         interaction?: { id?: string; output_text?: string | null }
       }>) {
         if (chunk.interaction?.id) {
           interactionKinds.set(chunk.interaction.id, 'model')
         }
         if (chunk.event_type === 'step.delta') {
+          if (chunk.delta?.type === 'text' && typeof chunk.delta.text === 'string' && chunk.delta.text.length > 0) {
+            accumulated += chunk.delta.text
+            this.emitCritiqueText(input.iteration, accumulated, false)
+          }
           for (const part of chunk.delta?.content ?? []) {
             if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
               accumulated += part.text
               this.emitCritiqueText(input.iteration, accumulated, false)
             }
           }
-        } else if (chunk.event_type === 'interaction.complete' && !accumulated && chunk.interaction?.output_text) {
+        } else if (
+          (chunk.event_type === 'interaction.complete' || chunk.event_type === 'interaction.completed') &&
+          !accumulated &&
+          chunk.interaction?.output_text
+        ) {
           accumulated = chunk.interaction.output_text
         }
       }
@@ -617,6 +639,7 @@ export class ArgonOrchestrator {
     const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
     const prompt = [
       `Repair the runtime mount failure in the generated physics level: ${input.error}`,
+      ...(input.stack ? [`Stack trace:\n${input.stack}`] : []),
       `Iteration: ${input.iteration}`,
       `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
       ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
@@ -656,9 +679,11 @@ export class ArgonOrchestrator {
     const startedAt = performance.now()
     const timings: Record<string, number> = {}
     const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+    const revisionInstruction = 'twist' in input && input.twist ? input.twist : ('instruction' in input ? input.instruction : '')
     const prompt = [
-      `Revise the current physics level according to this instruction: ${input.instruction}`,
-      `Iteration: ${input.iteration}`,
+      `Revise the current physics level according to this instruction: ${revisionInstruction}`,
+      ...(input.goal ? [`Original level goal: ${input.goal}`] : []),
+      ...('iteration' in input && input.iteration !== undefined ? [`Iteration: ${input.iteration}`] : []),
       `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
       ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
       levelContract.trim(),
