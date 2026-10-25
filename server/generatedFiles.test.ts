@@ -57,3 +57,62 @@ test('preflight accepts a generated module matching the mounted level contract',
 
   assert.deepEqual(diagnostics, [])
 })
+
+test('preflight accepts generated modules importing from ../engine/breakageKit', async () => {
+  const files = validateGeneratedFiles([{
+    path: 'src/generated/activeLevel.ts',
+    content: `
+      import type { GeneratedLevelModule } from '../engine/types'
+      import {
+        createBreakableWall,
+        createSnapJoint,
+        createLavaSensor,
+        createGoalSensor,
+        applyLaunchImpulse,
+      } from '../engine/breakageKit'
+
+      export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world, bodies, events) => {
+        const wall = createBreakableWall(scene, world, bodies, {
+          position: [0, 1.5, 0],
+          size: [3, 3, 0.5],
+          rows: 3,
+          cols: 3,
+        })
+        const lava = createLavaSensor(scene, world, { position: [0, -2, 0], size: [10, 0.5, 10] })
+        const goalZone = createGoalSensor(scene, world, { position: [4, 1, 0], size: [2, 2, 2] })
+        if (wall.bricks.length >= 2) {
+          const joint = createSnapJoint(world, {
+            bodyA: wall.bricks[0].body,
+            bodyB: wall.bricks[1].body,
+            breakForce: 50,
+          })
+          joint.step()
+          applyLaunchImpulse(wall.bricks[0].body, { direction: [1, 0.5, 0], magnitude: 10 })
+        }
+        return {
+          stepBotAndRules: () => {
+            wall.step(events)
+            const failed = lava.containsNamedBody(bodies, 'wall_0_0_0')
+            const won = goalZone.containsNamedBody(bodies, 'wall_0_0_0')
+            return { botState: 'testing', goalReached: won, ...(failed ? { failedEarly: 'fell in lava' } : {}) }
+          },
+          stepHumanAndRules: () => {
+            wall.step(events)
+            return { botState: 'human', goalReached: false }
+          },
+          controls: [{ key: 'Space', action: 'Launch' }],
+          goal: { type: 'in-region', body: 'wall_0_0_0', min: [3, 0, -1], max: [5, 2, 1] },
+          dispose: () => {
+            wall.dispose()
+            lava.dispose()
+            goalZone.dispose()
+          },
+        }
+      }
+    `,
+  }])
+
+  const diagnostics = await checkGeneratedTypeScript(files, process.cwd())
+  assert.deepEqual(diagnostics, [])
+})
+
