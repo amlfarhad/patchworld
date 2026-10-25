@@ -237,6 +237,41 @@ async function startGoal(socket: WebSocket, goal: string): Promise<void> {
   }
 }
 
+/** Changes the current world instead of starting over; history, attempt numbering and the Gemini conversation carry on. */
+async function startTwist(socket: WebSocket, twist: string): Promise<void> {
+  const text = twist.trim()
+  if (!text || text.length > 800) {
+    sendJson(socket, { type: 'goal-error', message: 'Enter a twist between 1 and 800 characters.' })
+    return
+  }
+  const baseGoal = worldGoal
+  const combinedGoal = baseGoal ? `${baseGoal} Twist: ${text}` : text
+  // Take ownership first: bumping the epoch drops any critique patch still in flight.
+  const epoch = ++goalEpoch
+  const orchestrator = createOrchestrator(epoch)
+  if (!baseGoal || !orchestrator.reviseWorld) return startGoal(socket, combinedGoal)
+  clearMountWatchdog()
+  awaitingLevelMount = false
+  activeGoal = combinedGoal
+  worldGoal = combinedGoal
+  engineSocket = socket
+  // A twist continues the same history and numbering, so earlier attempts stay comparable.
+  settleLatestIteration('abandoned')
+  const chainId = previousInteractionId
+  const currentFiles = await readCurrentGeneratedFiles()
+  if (epoch !== goalEpoch) return
+  sendToRole('browser', { type: 'start-goal-accepted', goal: combinedGoal })
+  try {
+    const patch = await orchestrator.reviseWorld({ goal: baseGoal, twist: text, currentFiles, previousInteractionId: chainId }, validateFiles)
+    if (epoch !== goalEpoch) return
+    if (!await applyIterationPatch(patch, patch.interactionId, epoch)) return
+    emitProgress({ phase: 'hmr-pending', message: 'Twist applied; waiting for the browser to mount the updated module.', iteration })
+  } catch (error) {
+    if (epoch !== goalEpoch) return
+    reportGoalError(error, socket)
+  }
+}
+
 async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestPacket>>): Promise<void> {
   if (!activeGoal) return
   const epoch = goalEpoch
@@ -515,6 +550,7 @@ async function handleBrowserMessage(
       emitProgress({ phase: 'human', message: 'Autonomous loop paused. Human control enabled.' })
     }
     else if (message.type === 'start-goal' && typeof message.goal === 'string') void startGoal(socket, message.goal)
+    else if (message.type === 'twist' && typeof message.twist === 'string') void startTwist(socket, message.twist)
     else if (message.type === 'level-mounted') {
       if (!isEngine(socket)) return
       clearMountWatchdog()
