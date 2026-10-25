@@ -5,22 +5,29 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   ArgonOrchestrator,
+  BUILDER_FILE_PATHS,
   buildCritiquePrompt,
+  buildModuleBuilderPrompt,
   buildPatchPrompt,
   buildWorldGenerationPrompt,
+  buildWorldPlanPrompt,
   createCritiqueTextMessage,
   extractInteractionText,
   filterChangedFiles,
+  identifyFailingFiles,
   levelContract,
   loadLearnedSkill,
   mergeWithCurrentFiles,
   patchResponseSchema,
   resolveChainedInteractionId,
+  resolveWorldThinkingLevel,
   shrinkTelemetry,
   waitForUploadedFileActive,
+  worldPlanSchema,
   type FailedRunInput,
   type OrchestratorEvent,
   type TelemetryFrame,
+  type WorldPlanSpec,
 } from './argonOrchestrator.ts'
 
 test('extractInteractionText concatenates all model_output steps and falls back to output_text', () => {
@@ -136,7 +143,7 @@ test('mergeWithCurrentFiles and filterChangedFiles keep only modified files', ()
   assert.deepEqual(changed, partialPatch)
 })
 
-test('critiqueAndPatchWorld splits streamed critique from low-thinking patch call and emits critique-text', async () => {
+test('critiqueAndPatchWorld tries Managed Agent critique first, falls back to streamed model critique on error/timeout, and runs low-thinking patch call', async () => {
   process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key'
   const events: OrchestratorEvent[] = []
   const orchestrator = new ArgonOrchestrator((event) => events.push(event))
@@ -160,6 +167,9 @@ test('critiqueAndPatchWorld splits streamed critique from low-thinking patch cal
     interactions: {
       create: async (params: Record<string, unknown>) => {
         createCalls.push(params)
+        if (params.agent) {
+          throw new Error('400 Video input is not supported.')
+        }
         if (params.stream) {
           return (async function* () {
             yield {
@@ -227,13 +237,15 @@ test('critiqueAndPatchWorld splits streamed critique from low-thinking patch cal
     async () => [],
   )
 
-  assert.equal(createCalls.length, 2)
-  assert.equal(createCalls[0]?.stream, true)
-  assert.equal(createCalls[1]?.background, true)
-  assert.equal(createCalls[1]?.response_mime_type, 'application/json')
-  assert.deepEqual(createCalls[1]?.response_format, patchResponseSchema)
+  assert.equal(createCalls.length, 3)
+  assert.equal(createCalls[0]?.agent, 'antigravity-preview-09-2026')
+  assert.equal(createCalls[0]?.environment, 'remote')
+  assert.equal(createCalls[1]?.stream, true)
+  assert.equal(createCalls[2]?.background, true)
+  assert.equal(createCalls[2]?.response_mime_type, 'application/json')
+  assert.deepEqual(createCalls[2]?.response_format, patchResponseSchema)
   assert.equal(
-    (createCalls[1]?.generation_config as { thinking_level?: string })?.thinking_level,
+    (createCalls[2]?.generation_config as { thinking_level?: string })?.thinking_level,
     'low',
   )
 
@@ -261,8 +273,97 @@ test('critiqueAndPatchWorld splits streamed critique from low-thinking patch cal
   assert.equal(typeof patch.timings?.totalMs, 'number')
 })
 
-test('generateInitialWorld uses structured JSON schema, injects .agents/SKILL.md, and includes Vedant levelContract', async () => {
+test('critiqueAndPatchWorld uses Managed Agent critique output when agent succeeds within 90s budget', async () => {
   process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key'
+  const events: OrchestratorEvent[] = []
+  const orchestrator = new ArgonOrchestrator((event) => events.push(event))
+  assert.equal(orchestrator.managedAgentTimeoutMs, 90_000)
+
+  const createCalls: Array<Record<string, unknown>> = []
+  ;(orchestrator as unknown as { ai: unknown }).ai = {
+    files: {
+      upload: async () => ({
+        name: 'files/run2',
+        uri: 'https://example.com/run2.webm',
+        mimeType: 'video/webm',
+        state: 'ACTIVE',
+      }),
+      get: async () => ({
+        name: 'files/run2',
+        uri: 'https://example.com/run2.webm',
+        mimeType: 'video/webm',
+        state: 'ACTIVE',
+      }),
+    },
+    interactions: {
+      create: async (params: Record<string, unknown>) => {
+        createCalls.push(params)
+        if (params.agent) {
+          return {
+            id: 'agent-critique-1',
+            status: 'completed',
+            output_text: 'Sandbox calculation: boulder needs vx >= 14.2 m/s to clear the gap.',
+          }
+        }
+        return {
+          id: 'patch-interaction-2',
+          status: 'completed',
+          output_text: JSON.stringify({
+            files: [{ path: 'src/generated/activeLevel.ts', content: 'export const v = 3;' }],
+          }),
+        }
+      },
+      get: async (id: string) => {
+        if (id === 'agent-critique-1') {
+          return {
+            id: 'agent-critique-1',
+            status: 'completed',
+            output_text: 'Sandbox calculation: boulder needs vx >= 14.2 m/s to clear the gap.',
+          }
+        }
+        return {
+          id: 'patch-interaction-2',
+          status: 'completed',
+          output_text: JSON.stringify({
+            files: [{ path: 'src/generated/activeLevel.ts', content: 'export const v = 3;' }],
+          }),
+        }
+      },
+    },
+  }
+
+  const patch = await orchestrator.critiqueAndPatchWorld(
+    {
+      videoBytes: new Uint8Array([1, 2]),
+      metadata: {
+        type: 'PLAYTEST_FAILED_PAYLOAD',
+        runId: 'run_2',
+        frameCount: 1,
+        failureReason: 'Goal not reached',
+        telemetry: [],
+      },
+      currentFiles: [{ path: 'src/generated/activeLevel.ts', content: 'export const v = 1;' }],
+      iteration: 1,
+    },
+    async () => [],
+  )
+
+  assert.equal(createCalls.length, 2)
+  assert.equal(createCalls[0]?.agent, 'antigravity-preview-09-2026')
+  assert.equal(createCalls[0]?.environment, 'remote')
+  const agentInput = createCalls[0]?.input as Array<{ type: string; uri?: string }>
+  assert.equal(agentInput[0]?.type, 'video')
+  assert.equal(agentInput[0]?.uri, 'https://example.com/run2.webm')
+  assert.equal(patch.diagnosis, 'Sandbox calculation: boulder needs vx >= 14.2 m/s to clear the gap.')
+  assert.ok(events.some((e) => e.critiqueFinal && e.critiqueText?.includes('vx >= 14.2 m/s')))
+})
+
+test('generateInitialWorld falls back to single-call medium-thinking generation when planner fails, and respects ARGON_WORLD_THINKING', async () => {
+  process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key'
+  assert.equal(resolveWorldThinkingLevel({}), 'medium')
+  assert.equal(resolveWorldThinkingLevel({ ARGON_WORLD_THINKING: 'low' }), 'low')
+  assert.equal(resolveWorldThinkingLevel({ ARGON_WORLD_THINKING: 'high' }), 'high')
+
   const tempSkill = join(tmpdir(), `skill-${Date.now()}.md`)
   await writeFile(tempSkill, '# Catapult Invariant\nUse counterweight density >= 3.0.', 'utf8')
   try {
@@ -305,13 +406,147 @@ test('generateInitialWorld uses structured JSON schema, injects .agents/SKILL.md
     const result = await orchestrator.generateInitialWorld('Knock the tower down', async () => [])
     assert.equal(capturedParams?.response_mime_type, 'application/json')
     assert.deepEqual(capturedParams?.response_format, patchResponseSchema)
+    assert.deepEqual(capturedParams?.generation_config, {
+      max_output_tokens: 65_536,
+      thinking_level: 'medium',
+    })
     assert.ok(String(capturedParams?.input).includes('Use counterweight density >= 3.0.'))
     assert.equal(result.files.length, 1)
-    assert.equal( resolveChainedInteractionId('world-1', 'model'), 'world-1')
+    assert.equal(resolveChainedInteractionId('world-1', 'model'), 'world-1')
     assert.equal(resolveChainedInteractionId('world-1', 'agent'), undefined)
   } finally {
     await rm(tempSkill, { force: true })
   }
+})
+
+test('generateInitialWorld runs planner + 3 parallel builders and repairs only failing file(s)', async () => {
+  process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key'
+  const spec: WorldPlanSpec = {
+    layoutAlongX: 'Start platform at x=-10, gap at x=0, goal platform at x=10',
+    namedBodies: [
+      { name: 'groundTile', owner: 'scene', bodyType: 'fixed', shape: 'box', position: [-10, 0, 0], size: [6, 1, 4], role: 'Start platform' },
+      { name: 'player', owner: 'mechanics', bodyType: 'dynamic', shape: 'capsule', position: [-10, 2, 0], size: [0.8, 1.4, 0.8], role: 'Player body' },
+    ],
+    controls: [
+      { key: 'KeyD', action: 'Move right' },
+      { key: 'Space', action: 'Jump' },
+    ],
+    goal: { type: 'near-point', body: 'player', target: [10, 2, 0], radius: 2 },
+    fileOwnership: {
+      scene: 'Terrain and start/goal platforms',
+      mechanics: 'Player movement, jump, and hazards',
+      activeLevel: 'Entry buildWorld wiring scene and mechanics',
+    },
+  }
+
+  const createInputs: string[] = []
+  let callIndex = 0
+  const orchestrator = new ArgonOrchestrator(() => {})
+  ;(orchestrator as unknown as { ai: unknown }).ai = {
+    interactions: {
+      create: async (params: Record<string, unknown>) => {
+        callIndex += 1
+        const id = `call-${callIndex}`
+        const inputText = String(params.input)
+        createInputs.push(inputText)
+        if (params.response_format === worldPlanSchema) {
+          return { id, status: 'completed', output_text: JSON.stringify(spec) }
+        }
+        for (const targetPath of BUILDER_FILE_PATHS) {
+          if (inputText.includes(`{"files":[{"path":"${targetPath}"`)) {
+            return {
+              id,
+              status: 'completed',
+              output_text: JSON.stringify({
+                files: [{ path: targetPath, content: `// draft ${targetPath}` }],
+              }),
+            }
+          }
+        }
+        // Targeted repair call
+        return {
+          id,
+          status: 'completed',
+          output_text: JSON.stringify({
+            files: [{ path: 'src/generated/mechanics.ts', content: '// repaired src/generated/mechanics.ts' }],
+          }),
+        }
+      },
+      get: async (id: string) => {
+        if (id === 'call-1') return { id, status: 'completed', output_text: JSON.stringify(spec) }
+        if (id === 'call-2') {
+          return {
+            id,
+            status: 'completed',
+            output_text: JSON.stringify({ files: [{ path: 'src/generated/scene.ts', content: '// draft src/generated/scene.ts' }] }),
+          }
+        }
+        if (id === 'call-3') {
+          return {
+            id,
+            status: 'completed',
+            output_text: JSON.stringify({ files: [{ path: 'src/generated/mechanics.ts', content: '// draft src/generated/mechanics.ts' }] }),
+          }
+        }
+        if (id === 'call-4') {
+          return {
+            id,
+            status: 'completed',
+            output_text: JSON.stringify({ files: [{ path: 'src/generated/activeLevel.ts', content: '// draft src/generated/activeLevel.ts' }] }),
+          }
+        }
+        return {
+          id,
+          status: 'completed',
+          output_text: JSON.stringify({ files: [{ path: 'src/generated/mechanics.ts', content: '// repaired src/generated/mechanics.ts' }] }),
+        }
+      },
+    },
+  }
+
+  let validateCalls = 0
+  const result = await orchestrator.generateInitialWorld('Parkour course', async (files) => {
+    validateCalls += 1
+    assert.equal(files.length, 3)
+    if (validateCalls === 1) {
+      return ['src/generated/mechanics.ts(12,5): error TS2322: Type string is not assignable to number.']
+    }
+    return []
+  })
+
+  // 1 planner + 3 parallel builders + 1 targeted repair
+  assert.equal(createInputs.length, 5)
+  const repairPrompt = createInputs[4]!
+  assert.ok(repairPrompt.includes('src/generated/mechanics.ts'))
+  assert.ok(!repairPrompt.includes('// draft src/generated/scene.ts'))
+  assert.ok(!repairPrompt.includes('// draft src/generated/activeLevel.ts'))
+  assert.equal(result.files.length, 3)
+  assert.equal(
+    result.files.find((f) => f.path === 'src/generated/mechanics.ts')?.content,
+    '// repaired src/generated/mechanics.ts',
+  )
+
+  const failingOnly = identifyFailingFiles(result.files, [
+    'src/generated/scene.ts(4,1): error TS1005: ";" expected.',
+  ])
+  assert.equal(failingOnly.length, 1)
+  assert.equal(failingOnly[0]?.path, 'src/generated/scene.ts')
+})
+
+test('planner and builder prompts reference ../engine/assetKit models and helpers', () => {
+  const spec: WorldPlanSpec = {
+    layoutAlongX: 'x=-8 to x=12',
+    namedBodies: [{ name: 'player', owner: 'mechanics', bodyType: 'dynamic', position: [0, 1, 0], size: [1, 1, 1], role: 'hero' }],
+    controls: [{ key: 'Space', action: 'Jump' }],
+    goal: { type: 'above-y', body: 'player', y: 5 },
+    fileOwnership: { scene: 'terrain', mechanics: 'player', activeLevel: 'entry' },
+  }
+  const planPrompt = buildWorldPlanPrompt('Mario parkour', '', { useAssetKit: true })
+  const scenePrompt = buildModuleBuilderPrompt('src/generated/scene.ts', 'Mario parkour', spec, '', { useAssetKit: true })
+  assert.ok(planPrompt.includes('../engine/assetKit'))
+  assert.ok(scenePrompt.includes('../engine/assetKit'))
+  assert.ok(scenePrompt.includes('createCharacter'))
+  assert.ok(scenePrompt.includes('createPlatformTile'))
 })
 
 test('levelContract and generation prompt enforce KeyboardEvent.code controls, genre-agnostic contact/finite-spawn/reachability mechanics, and bot mechanic coverage', () => {
