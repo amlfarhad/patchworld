@@ -1,10 +1,8 @@
 import 'dotenv/config'
 import { GoogleGenAI } from '@google/genai'
 import { existsSync } from 'node:fs'
-import { readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { basename, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
 import type { GeneratedFile } from './generatedFiles.ts'
@@ -685,7 +683,7 @@ export function buildCritiquePrompt(
 ): string {
   const failureReason = input.metadata.failureReason ?? 'Goal not reached'
   return [
-    'Inspect the attached browser playtest video, the compacted frame telemetry, and the current generated files.',
+    'Inspect the compacted frame telemetry, key contact/fall events, and the current generated files.',
     'Check declared controls and interactive object behaviour against the goal, not just whether the goal was reached:',
     '1. TOP PRIORITY — Dead controls: If the failure reason reports dead controls (e.g. "Declared controls did nothing: ..."), treat fixing every dead binding as the #1 priority. Verify that controls are declared with KeyboardEvent.code (e.g. \'KeyW\', \'KeyA\', \'ArrowUp\', \'Space\', \'ShiftLeft\'), onPointerOrKey matches on event.code, and every declared binding (including both WASD and Arrow keys when both are declared) produces a physical action in onPointerOrKey/stepHumanAndRules.',
     '2. Directional contact over proximity: Check that interactive objects fire on the specific physical contact implied by the goal (hit from below, stomp from above, direct touch/collision), never on mere proximity.',
@@ -953,7 +951,6 @@ export class ArgonOrchestrator {
   }
 
   private async streamFastCritique(
-    activeVideo: UploadedFileHandle,
     compactTelemetry: ShrunkTelemetry,
     input: FailedRunInput,
   ): Promise<string> {
@@ -962,10 +959,7 @@ export class ArgonOrchestrator {
     const response = await this.ai.interactions.create({
       model: critiqueModel,
       stream: true,
-      input: [
-        { type: 'video', uri: activeVideo.uri, mime_type: activeVideo.mimeType ?? 'video/webm' },
-        { type: 'text', text: critiquePrompt },
-      ],
+      input: critiquePrompt,
       generation_config: {
         max_output_tokens: 4_096,
         thinking_level: 'low',
@@ -1027,9 +1021,6 @@ export class ArgonOrchestrator {
   ): Promise<{ id: string; text: string }> {
     const chainedAgentId = resolveChainedInteractionId(previousInteractionId, 'agent')
     const timeoutMs = options.timeoutMs ?? this.managedAgentTimeoutMs
-    // Note: Managed Agent ('antigravity-preview-09-2026', environment: 'remote') is a text + Python sandbox
-    // endpoint and rejects `{ type: 'video' }` content parts with HTTP 400 ("Video input is not supported.").
-    // Always pass the telemetry + code prompt as text input so the agent succeeds without a 400 error.
     const interaction = await this.ai.interactions.create({
       agent: managedAgent,
       environment: 'remote',
@@ -1054,58 +1045,38 @@ export class ArgonOrchestrator {
     validate: (files: GeneratedFile[]) => Promise<string[]>,
   ): Promise<GeneratedPatch> {
     const startedAt = performance.now()
-    const timings: Record<string, number> = {}
-    const videoPath = join(tmpdir(), `argon-${randomUUID()}.webm`)
-    await writeFile(videoPath, input.videoBytes)
-    try {
-      const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
-      const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
-      const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
+    const timings: Record<string, number> = { uploadMs: 0 }
+    const compactTelemetry = shrinkTelemetry(input.metadata.telemetry)
+    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+    const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
 
+    this.emit({
+      phase: 'critiquing',
+      message: 'Running playtest critique on telemetry and level code…',
+      iteration: input.iteration,
+    })
+
+    const critiqueStart = performance.now()
+    let critiqueText: string
+    try {
+      const agentCritique = await this.runManagedAgentCritique(
+        critiquePrompt,
+        input.previousInteractionId,
+        {
+          timeoutMs: this.managedAgentTimeoutMs,
+          iteration: input.iteration,
+        },
+      )
+      critiqueText = agentCritique.text
+    } catch {
       this.emit({
         phase: 'critiquing',
-        message: 'Running Managed Agent playtest critique on telemetry and level code…',
+        message: 'Streaming playtest telemetry critique…',
         iteration: input.iteration,
       })
-
-      // Start the WebM upload in parallel so Managed Agent critique starts immediately (saving ~4-5s),
-      // while keeping the uploaded video ready if fallback to multimodal streamed critique is needed.
-      const uploadStart = performance.now()
-      const uploadPromise = this.ai.files
-        .upload({
-          file: videoPath,
-          config: { mimeType: 'video/webm' },
-        })
-        .then((uploadedVideo) => waitForUploadedFileActive(this.ai.files, uploadedVideo))
-        .then((activeVideo) => {
-          timings.uploadMs = Math.round(performance.now() - uploadStart)
-          return activeVideo
-        })
-
-      const critiqueStart = performance.now()
-      let critiqueText: string
-      try {
-        const agentCritique = await this.runManagedAgentCritique(
-          critiquePrompt,
-          input.previousInteractionId,
-          {
-            timeoutMs: this.managedAgentTimeoutMs,
-            iteration: input.iteration,
-          },
-        )
-        critiqueText = agentCritique.text
-        await uploadPromise.catch(() => undefined)
-      } catch {
-        this.emit({
-          phase: 'critiquing',
-          message: 'Streaming multimodal video and telemetry critique…',
-          iteration: input.iteration,
-        })
-        const activeVideo = await uploadPromise
-        critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
-      }
-      timings.uploadMs = timings.uploadMs ?? Math.round(performance.now() - uploadStart)
-      timings.critiqueMs = Math.round(performance.now() - critiqueStart)
+      critiqueText = await this.streamFastCritique(compactTelemetry, input)
+    }
+    timings.critiqueMs = Math.round(performance.now() - critiqueStart)
 
       this.emit({
         phase: 'patching',
@@ -1144,18 +1115,15 @@ export class ArgonOrchestrator {
       )
       const diagnosis = patched.diagnosis ?? critiqueText
       timings.totalMs = Math.round(performance.now() - startedAt)
-      this.emit({
-        phase: 'patched',
-        message: `Critique and patch completed in ${timings.totalMs}ms (upload ${timings.uploadMs}ms, critique ${timings.critiqueMs}ms, patch ${timings.patchMs}ms).`,
-        iteration: input.iteration,
-        diagnosis,
-        durationMs: timings.totalMs,
-        timings,
-      })
-      return { ...patched, diagnosis, timings }
-    } finally {
-      await rm(videoPath, { force: true })
-    }
+    this.emit({
+      phase: 'patched',
+      message: `Critique and patch completed in ${timings.totalMs}ms (upload ${timings.uploadMs}ms, critique ${timings.critiqueMs}ms, patch ${timings.patchMs}ms).`,
+      iteration: input.iteration,
+      diagnosis,
+      durationMs: timings.totalMs,
+      timings,
+    })
+    return { ...patched, diagnosis, timings }
   }
 
   async repairMountFailure(
