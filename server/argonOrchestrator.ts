@@ -1,8 +1,9 @@
 import 'dotenv/config'
 import { GoogleGenAI } from '@google/genai'
+import { existsSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import type { PlaytestFailedMetadata } from '../src/shared/protocol.ts'
@@ -11,8 +12,32 @@ import type { GeneratedFile } from './generatedFiles.ts'
 const model = process.env.ARGON_MODEL ?? 'gemini-4-argon'
 const critiqueModel = process.env.ARGON_CRITIQUE_MODEL ?? 'gemini-3.8-flash'
 const managedAgent = process.env.ARGON_AGENT ?? 'antigravity-preview-09-2026'
-const pollIntervalMs = 2_000
+const pollIntervalMs = 1_000
+const defaultManagedAgentTimeoutMs = 90_000
+const defaultWorldMaxOutputTokens = 65_536
 const defaultSkillPath = resolve(process.cwd(), '.agents/SKILL.md')
+
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high'
+
+export function resolveWorldThinkingLevel(env: NodeJS.ProcessEnv = process.env): ThinkingLevel {
+  const raw = (env.ARGON_WORLD_THINKING ?? '').trim().toLowerCase()
+  if (raw === 'minimal' || raw === 'low' || raw === 'medium' || raw === 'high') {
+    return raw
+  }
+  return 'medium'
+}
+
+export function isAssetKitAvailable(projectRoot = process.cwd()): boolean {
+  return existsSync(resolve(projectRoot, 'src/engine/assetKit.ts'))
+}
+
+export const BUILDER_FILE_PATHS = [
+  'src/generated/scene.ts',
+  'src/generated/mechanics.ts',
+  'src/generated/activeLevel.ts',
+] as const
+
+export type BuilderFilePath = (typeof BUILDER_FILE_PATHS)[number]
 
 export const patchResponseSchema = {
   type: 'object',
@@ -33,6 +58,93 @@ export const patchResponseSchema = {
   },
   required: ['files'],
 } as const
+
+export const worldPlanSchema = {
+  type: 'object',
+  properties: {
+    layoutAlongX: { type: 'string' },
+    namedBodies: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          owner: { type: 'string', enum: ['scene', 'mechanics'] },
+          bodyType: { type: 'string', enum: ['fixed', 'dynamic', 'kinematicPosition'] },
+          shape: { type: 'string', enum: ['box', 'ball', 'capsule'] },
+          position: { type: 'array', items: { type: 'number' } },
+          size: { type: 'array', items: { type: 'number' } },
+          role: { type: 'string' },
+        },
+        required: ['name', 'owner', 'bodyType', 'position', 'size', 'role'],
+      },
+    },
+    controls: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string' },
+          action: { type: 'string' },
+        },
+        required: ['key', 'action'],
+      },
+    },
+    goal: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['below-y', 'above-y', 'in-region', 'near-point'] },
+        body: { type: 'string' },
+        y: { type: 'number' },
+        min: { type: 'array', items: { type: 'number' } },
+        max: { type: 'array', items: { type: 'number' } },
+        target: { type: 'array', items: { type: 'number' } },
+        radius: { type: 'number' },
+      },
+      required: ['type', 'body'],
+    },
+    fileOwnership: {
+      type: 'object',
+      properties: {
+        scene: { type: 'string' },
+        mechanics: { type: 'string' },
+        activeLevel: { type: 'string' },
+      },
+      required: ['scene', 'mechanics', 'activeLevel'],
+    },
+  },
+  required: ['layoutAlongX', 'namedBodies', 'controls', 'goal', 'fileOwnership'],
+} as const
+
+export interface PlannedBodySpec {
+  name: string
+  owner: 'scene' | 'mechanics'
+  bodyType: 'fixed' | 'dynamic' | 'kinematicPosition'
+  shape?: 'box' | 'ball' | 'capsule'
+  position: [number, number, number]
+  size: [number, number, number]
+  role: string
+}
+
+export interface WorldPlanSpec {
+  layoutAlongX: string
+  namedBodies: PlannedBodySpec[]
+  controls: Array<{ key: string; action: string }>
+  goal: {
+    type: 'below-y' | 'above-y' | 'in-region' | 'near-point'
+    body: string
+    y?: number
+    min?: [number, number, number]
+    max?: [number, number, number]
+    target?: [number, number, number]
+    radius?: number
+  }
+  fileOwnership: {
+    scene: string
+    mechanics: string
+    activeLevel: string
+  }
+}
 
 export interface CritiqueTextMessage {
   type: 'critique-text'
@@ -110,6 +222,23 @@ export type ReviseWorldInput = TwistInput | {
   iteration?: number
 }
 
+export const assetKitGuidance = `
+Reusable 3D Asset & Gameplay Kit ('../engine/assetKit'):
+Prefer importing ready-made models and helpers from '../engine/assetKit' instead of building raw box/sphere programmer art:
+- Models (return THREE.Group, take { position?: [x,y,z], scale?: number | [x,y,z], color?: number }):
+  createCharacter(opts?), createEnemy(opts?), createTree(opts?), createRock(opts?),
+  createCrate(opts?), createCoin(opts?), createItemBlock(opts?), createGoalFlag(opts?),
+  createPlatformTile({ position?, scale?, color?, topColor?, size?: [w,h,d] })
+- Background scenery instancing:
+  scatter(scene, templateGroup, count, { min: [minX, minZ], max: [maxX, maxZ], y?: number, minRadius?: number }, seed?)
+- Physics collider helper:
+  createBodyWithCollider(world, { type?: 'dynamic' | 'fixed' | 'kinematicPosition', shape?: 'box' | 'capsule' | 'ball', position?: [x,y,z], size?: [w,h,d], halfHeight?: number, radius?: number, density?: number, friction?: number, restitution?: number, lockRotations?: boolean })
+- Gameplay helpers:
+  - createPlayerController(world, body, { moveSpeed?, jumpSpeed?, leftKeys?, rightKeys?, jumpKeys? }) -> { heldKeys, onPointerOrKey(event), step(), syncMesh(mesh) }
+  - collectOnce(mesh, { radius?, onCollect? }) -> { triggered, check(actorBody), reset() }
+  - hitFromBelow(blockMesh, { width?, reachY?, once?, onHit? }) -> { triggered, check(actorBody), reset() }
+`
+
 export const levelContract = `
 Generated TypeScript must export buildWorld(scene, world, namedBodies, eventQueue) and return MountedLevel matching src/engine/types.ts.
 The exact host contract is:
@@ -156,9 +285,44 @@ Host stage & physics rules:
 - Bot playtest coverage: stepBotAndRules must actively exercise the level's main mechanics on its way to the goal (use the declared jump/ability, hit interactive blocks/switches, engage targets/obstacles) so the playtest verifies mechanics rather than taking a straight run to the goal.
 - Optional breakage & sensor kit helpers may be imported from '../engine/breakageKit':
   createBreakableWall(scene, world, namedBodies, options), createSnapJoint(world, options), createSensorZone(scene, world, options), createLavaSensor(scene, world, options), createGoalSensor(scene, world, options), applyLaunchImpulse(body, options).
+- When '../engine/assetKit' is available, import models and helpers from '../engine/assetKit' (createCharacter, createEnemy, createTree, createRock, createCrate, createCoin, createItemBlock, createGoalFlag, createPlatformTile, scatter, createBodyWithCollider, createPlayerController, collectOnce, hitFromBelow) instead of building everything from boxes.
 - Import * as THREE from 'three' and RAPIER from '@dimforge/rapier3d-compat'. Keep all generated files as direct children of src/generated/ (with entry module src/generated/activeLevel.ts).
 - Return one JSON object only matching the response schema: {"files":[{"path":"src/generated/activeLevel.ts","content":"..."}],"diagnosis":"short summary with video timestamps when available","skillContent":"Markdown physical invariants learned from evidence, or empty when none"}.
 - For patches, return only the files in src/generated/ that changed. Never use eval, Function, remote script loading, or write outside src/generated/.
+`
+
+export const multiFileModuleContract = `
+Shared 3-file module contract for parallel builders (MUST match these exact exports and signatures):
+1. src/generated/scene.ts:
+   - Owns static/environment terrain, platforms, structures, scenery, and all namedBodies where owner === "scene".
+   - Must export:
+     export interface SceneHandle {
+       dispose: () => void;
+     }
+     export function buildScene(
+       scene: THREE.Scene,
+       world: RAPIER.World,
+       namedBodies: Map<string, RAPIER.RigidBody>,
+     ): SceneHandle
+2. src/generated/mechanics.ts:
+   - Owns player controller, enemies, interactive blocks, pickups, projectiles, contact/interaction logic, and all namedBodies where owner === "mechanics".
+   - Must export:
+     export interface MechanicsHandle {
+       onPointerOrKey: (event: { type: string; key?: string; code?: string; ndc?: [number, number] }) => void;
+       stepBot: (frameIndex: number, elapsedSeconds: number) => { botState: string; failedEarly?: string };
+       stepHuman: (frameIndex: number, elapsedSeconds: number) => { botState: string; failedEarly?: string };
+       dispose: () => void;
+     }
+     export function buildMechanics(
+       scene: THREE.Scene,
+       world: RAPIER.World,
+       namedBodies: Map<string, RAPIER.RigidBody>,
+       eventQueue: RAPIER.EventQueue,
+     ): MechanicsHandle
+3. src/generated/activeLevel.ts:
+   - Entry module that imports { buildScene } from './scene' and { buildMechanics } from './mechanics'.
+   - Exports buildWorld(scene, world, namedBodies, eventQueue): MountedLevel matching src/engine/types.ts.
+   - Declares controls: ControlBinding[] and goal: LevelGoal from the planner spec, evaluates goalReached in stepBotAndRules and stepHumanAndRules, forwards onPointerOrKey to mechanics.onPointerOrKey, and calls mechanics.dispose() and sceneHandle.dispose() in dispose().
 `
 
 export async function loadLearnedSkill(skillFilePath = defaultSkillPath): Promise<string> {
@@ -175,10 +339,123 @@ export function buildWorldGenerationPrompt(goal: string, skillMarkdown = ''): st
     `Create a complete physics sandbox level for this goal: ${goal}`,
     levelContract.trim(),
   ]
+  if (isAssetKitAvailable()) {
+    sections.push(assetKitGuidance.trim())
+  }
   if (skillMarkdown.trim()) {
     sections.push(`Learned physics invariants from .agents/SKILL.md (apply these invariants when designing the level):\n${skillMarkdown.trim()}`)
   }
   return sections.join('\n\n')
+}
+
+export function buildWorldPlanPrompt(
+  goal: string,
+  skillMarkdown = '',
+  options: { useAssetKit?: boolean } = {},
+): string {
+  const useAssetKit = options.useAssetKit ?? isAssetKitAvailable()
+  const sections = [
+    `Plan a 3-file 3D physics level for this goal: ${goal}`,
+    'Return ONLY a JSON specification matching the schema (no TypeScript or code):',
+    '- layoutAlongX: concise spatial layout along the x-axis with coordinates, heights, and reachable gaps.',
+    '- namedBodies: every key rigid body with exact name, owner ("scene" for static/terrain or "mechanics" for player/enemies/pickups/projectiles), bodyType ("fixed" | "dynamic" | "kinematicPosition"), shape ("box" | "ball" | "capsule"), position [x, y, z], size [w, h, d], and role.',
+    '- controls: declared human controls using KeyboardEvent.code values (e.g. "KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowLeft", "ArrowDown", "ArrowRight", "Space", "ShiftLeft").',
+    '- goal: declarative LevelGoal referencing the target body name in namedBodies.',
+    '- fileOwnership: what src/generated/scene.ts (terrain, scenery, models), src/generated/mechanics.ts (player controller, enemies, pickups, interactions), and src/generated/activeLevel.ts (imports the other two, bot, goal, controls, MountedLevel) each own.',
+    useAssetKit
+      ? "Tell the builders in fileOwnership to import models and gameplay helpers from '../engine/assetKit' (createCharacter, createEnemy, createTree, createRock, createCrate, createCoin, createItemBlock, createGoalFlag, createPlatformTile, scatter, createBodyWithCollider, createPlayerController, collectOnce, hitFromBelow) instead of building everything from boxes."
+      : "When '../engine/assetKit' is available, builders import models and helpers from '../engine/assetKit' instead of building everything from boxes.",
+  ]
+  if (skillMarkdown.trim()) {
+    sections.push(`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown.trim()}`)
+  }
+  return sections.join('\n\n')
+}
+
+export function buildModuleBuilderPrompt(
+  targetPath: BuilderFilePath,
+  goal: string,
+  spec: WorldPlanSpec,
+  skillMarkdown = '',
+  options: { useAssetKit?: boolean } = {},
+): string {
+  const useAssetKit = options.useAssetKit ?? isAssetKitAvailable()
+  const roleSpecificInstructions =
+    targetPath === 'src/generated/scene.ts'
+      ? [
+          'Write ONLY src/generated/scene.ts (terrain, platforms, scenery, models, and all namedBodies in the spec with owner === "scene").',
+          'Export SceneHandle and buildScene(scene, world, namedBodies): SceneHandle exactly as specified in the 3-file contract.',
+          'Register every "scene" body from spec.namedBodies in namedBodies.set(name, body) using the exact name and coordinates in the spec.',
+        ].join('\n')
+      : targetPath === 'src/generated/mechanics.ts'
+        ? [
+            'Write ONLY src/generated/mechanics.ts (player controller, enemies, pickups, interactive blocks, projectiles, and all namedBodies in the spec with owner === "mechanics").',
+            'Export MechanicsHandle and buildMechanics(scene, world, namedBodies, eventQueue): MechanicsHandle exactly as specified in the 3-file contract.',
+            'Register every "mechanics" body from spec.namedBodies in namedBodies.set(name, body) using the exact name and coordinates in the spec.',
+            'Handle every control binding in spec.controls by matching event.code in onPointerOrKey and applying physical movement/impulses in stepHuman (if both WASD and Arrow keys are declared, both must work).',
+            'Ensure interactions fire only on the directional contact implied by the goal (hit from below, stomp from above, touch—never mere proximity), keep rewards/spawns finite, and make stepBot exercise the main mechanics on its way to the goal.',
+          ].join('\n')
+        : [
+            'Write ONLY src/generated/activeLevel.ts.',
+            "Import { buildScene } from './scene' and { buildMechanics } from './mechanics'.",
+            'Export buildWorld(scene, world, namedBodies, eventQueue): MountedLevel.',
+            'Call buildScene(scene, world, namedBodies) and buildMechanics(scene, world, namedBodies, eventQueue), expose spec.controls and spec.goal, evaluate whether spec.goal is reached against namedBodies in stepBotAndRules and stepHumanAndRules, delegate onPointerOrKey to mechanics.onPointerOrKey, and dispose both in dispose().',
+          ].join('\n')
+
+  const assetLine = useAssetKit
+    ? `${assetKitGuidance.trim()}\nImport models and helpers from '../engine/assetKit' instead of building everything from boxes.`
+    : "Note: Do not add an import statement for '../engine/assetKit' unless src/engine/assetKit.ts is present on disk; use Three.js primitives and '../engine/breakageKit' when needed."
+
+  const sections = [
+    `Goal: ${goal}`,
+    roleSpecificInstructions,
+    `Planner JSON specification:\n${JSON.stringify(spec, null, 2)}`,
+    multiFileModuleContract.trim(),
+    assetLine,
+    levelContract.trim(),
+    ...(skillMarkdown.trim() ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown.trim()}`] : []),
+    `Return ONLY a JSON object with a single file entry: {"files":[{"path":"${targetPath}","content":"..."}]}`,
+  ]
+  return sections.join('\n\n')
+}
+
+export function parseWorldPlan(output: string): WorldPlanSpec {
+  const start = output.indexOf('{')
+  const end = output.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('Planner returned no JSON object')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output.slice(start, end + 1))
+  } catch (error) {
+    throw new Error(`Planner returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!parsed || typeof parsed !== 'object') throw new Error('Planner spec must be an object')
+  const candidate = parsed as Partial<WorldPlanSpec>
+  if (
+    typeof candidate.layoutAlongX !== 'string' ||
+    !Array.isArray(candidate.namedBodies) ||
+    candidate.namedBodies.length === 0 ||
+    !Array.isArray(candidate.controls) ||
+    !candidate.goal ||
+    typeof candidate.goal.type !== 'string' ||
+    typeof candidate.goal.body !== 'string' ||
+    !candidate.fileOwnership ||
+    typeof candidate.fileOwnership.scene !== 'string' ||
+    typeof candidate.fileOwnership.mechanics !== 'string' ||
+    typeof candidate.fileOwnership.activeLevel !== 'string'
+  ) {
+    throw new Error('Planner spec is missing required fields (layoutAlongX, namedBodies, controls, goal, fileOwnership)')
+  }
+  return candidate as WorldPlanSpec
+}
+
+export function identifyFailingFiles(files: GeneratedFile[], diagnostics: string[]): GeneratedFile[] {
+  const joined = diagnostics.join('\n')
+  const matched = files.filter((file) => {
+    const base = basename(file.path)
+    return joined.includes(file.path) || joined.includes(base)
+  })
+  return matched.length > 0 ? matched : files
 }
 
 const fileUploadTimeoutMs = 60_000
@@ -448,6 +725,7 @@ export function buildPatchPrompt(
 
 export class ArgonOrchestrator {
   private readonly ai: GoogleGenAI
+  public managedAgentTimeoutMs = defaultManagedAgentTimeoutMs
 
   constructor(
     private readonly emit: (event: OrchestratorEvent) => void,
@@ -471,12 +749,16 @@ export class ArgonOrchestrator {
     })
   }
 
-  async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
-    const startedAt = performance.now()
-    const timings: Record<string, number> = {}
-    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+  async generateSingleCallWorld(
+    goal: string,
+    skillMarkdown: string,
+    validate: (files: GeneratedFile[]) => Promise<string[]>,
+    timings: Record<string, number> = {},
+    startedAt = performance.now(),
+  ): Promise<GeneratedPatch> {
+    const thinkingLevel = resolveWorldThinkingLevel()
     const prompt = buildWorldGenerationPrompt(goal, skillMarkdown)
-    this.emit({ phase: 'synthesizing', message: 'Synthesizing the first physics world…' })
+    this.emit({ phase: 'synthesizing', message: `Synthesizing physics world (single-call, thinking: ${thinkingLevel})…` })
     const synthStart = performance.now()
     const interaction = await this.ai.interactions.create({
       model,
@@ -485,8 +767,8 @@ export class ArgonOrchestrator {
       response_mime_type: 'application/json',
       response_format: patchResponseSchema,
       generation_config: {
-        max_output_tokens: 131_072,
-        thinking_level: 'high',
+        max_output_tokens: defaultWorldMaxOutputTokens,
+        thinking_level: thinkingLevel,
       },
       system_instruction: 'You generate safe, typed Three.js and Rapier level modules for the Argon engine. Follow the output contract and JSON schema exactly.',
     })
@@ -495,8 +777,160 @@ export class ArgonOrchestrator {
     timings.synthesisMs = Math.round(performance.now() - synthStart)
     const result = await this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt, [], timings)
     timings.totalMs = Math.round(performance.now() - startedAt)
+    console.log(`[ArgonOrchestrator] Single-call world generation (thinking=${thinkingLevel}) completed in ${timings.totalMs}ms (synthesis ${timings.synthesisMs}ms).`)
     this.emit({ phase: 'synthesized', message: `Initial world synthesized in ${timings.totalMs}ms.`, durationMs: timings.totalMs, timings })
     return { ...result, timings }
+  }
+
+  private async runPlanner(goal: string, skillMarkdown: string): Promise<{ spec: WorldPlanSpec; interactionId: string }> {
+    const planPrompt = buildWorldPlanPrompt(goal, skillMarkdown)
+    const interaction = await this.ai.interactions.create({
+      model,
+      background: true,
+      input: planPrompt,
+      response_mime_type: 'application/json',
+      response_format: worldPlanSchema,
+      generation_config: {
+        max_output_tokens: 8_192,
+        thinking_level: 'low',
+      },
+      system_instruction: 'You are the fast level planner for the Argon 3D physics engine. Return only a valid JSON specification with no code.',
+    })
+    interactionKinds.set(interaction.id, 'model')
+    const completed = await this.waitForInteraction(interaction.id, 'World planner')
+    const spec = parseWorldPlan(extractInteractionText(completed))
+    return { spec, interactionId: interaction.id }
+  }
+
+  private async runModuleBuilder(
+    targetPath: BuilderFilePath,
+    goal: string,
+    spec: WorldPlanSpec,
+    skillMarkdown: string,
+  ): Promise<{ file: GeneratedFile; interactionId: string }> {
+    const builderPrompt = buildModuleBuilderPrompt(targetPath, goal, spec, skillMarkdown)
+    const interaction = await this.ai.interactions.create({
+      model,
+      background: true,
+      input: builderPrompt,
+      response_mime_type: 'application/json',
+      response_format: patchResponseSchema,
+      generation_config: {
+        max_output_tokens: 32_768,
+        thinking_level: 'low',
+      },
+      system_instruction: `You are the parallel module builder for ${targetPath}. Follow the shared 3-file TypeScript contract and return only ${targetPath} in the JSON files array.`,
+    })
+    interactionKinds.set(interaction.id, 'model')
+    const completed = await this.waitForInteraction(interaction.id, `Builder ${basename(targetPath)}`)
+    const parsed = parsePatch(extractInteractionText(completed))
+    const matching = parsed.files.find((file) => file.path === targetPath) ?? parsed.files[0]
+    if (!matching || !matching.content.trim()) {
+      throw new Error(`Builder for ${targetPath} returned no file content`)
+    }
+    return {
+      file: { path: targetPath, content: matching.content },
+      interactionId: interaction.id,
+    }
+  }
+
+  async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
+    const startedAt = performance.now()
+    const timings: Record<string, number> = {}
+    const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
+
+    if (process.env.ARGON_DISABLE_PARALLEL_BUILD === '1') {
+      return this.generateSingleCallWorld(goal, skillMarkdown, validate, timings, startedAt)
+    }
+
+    try {
+      this.emit({ phase: 'synthesizing', message: 'Planning level layout, named bodies, controls, and file ownership…' })
+      const planStart = performance.now()
+      const { spec } = await this.runPlanner(goal, skillMarkdown)
+      timings.planMs = Math.round(performance.now() - planStart)
+
+      this.emit({
+        phase: 'synthesizing',
+        message: `Plan ready in ${timings.planMs}ms; running 3 parallel module builders (scene, mechanics, activeLevel)…`,
+      })
+      const buildersStart = performance.now()
+      const builderResults = await Promise.all(
+        BUILDER_FILE_PATHS.map((targetPath) => this.runModuleBuilder(targetPath, goal, spec, skillMarkdown)),
+      )
+      timings.buildersMs = Math.round(performance.now() - buildersStart)
+      timings.synthesisMs = timings.planMs + timings.buildersMs
+
+      let files = builderResults.map((result) => result.file)
+      let lastInteractionId = builderResults[builderResults.length - 1]!.interactionId
+
+      const typecheckStart = performance.now()
+      let diagnostics = await validate(files)
+      timings.typecheckMs = Math.round(performance.now() - typecheckStart)
+
+      if (diagnostics.length > 0) {
+        const repairStart = performance.now()
+        const failingFiles = identifyFailingFiles(files, diagnostics)
+        this.emit({
+          phase: 'typecheck-retry',
+          message: `TypeScript reported errors in ${failingFiles.map((f) => basename(f.path)).join(', ')}; running one targeted repair pass…`,
+        })
+        const repairPrompt = [
+          `Goal: ${goal}`,
+          `Planner JSON specification:\n${JSON.stringify(spec, null, 2)}`,
+          multiFileModuleContract.trim(),
+          levelContract.trim(),
+          `Failing file(s) to repair (resend ONLY these corrected file(s)):\n${JSON.stringify(failingFiles)}`,
+          `Compiler diagnostics:\n${diagnostics.join('\n')}`,
+          'Return only the repaired failing file(s) as the required JSON object.',
+        ].join('\n\n')
+        const repairInteraction = await this.ai.interactions.create({
+          model,
+          background: true,
+          input: repairPrompt,
+          response_mime_type: 'application/json',
+          response_format: patchResponseSchema,
+          generation_config: {
+            max_output_tokens: defaultWorldMaxOutputTokens,
+            thinking_level: 'low',
+          },
+          system_instruction: 'Repair only the failing TypeScript file(s) so all three generated modules compile cleanly together.',
+        })
+        interactionKinds.set(repairInteraction.id, 'model')
+        const completedRepair = await this.waitForInteraction(repairInteraction.id, 'Parallel builder repair pass')
+        const repairedPatch = parsePatch(extractInteractionText(completedRepair))
+        files = mergeWithCurrentFiles(repairedPatch.files, files)
+        diagnostics = await validate(files)
+        timings.repairMs = Math.round(performance.now() - repairStart)
+        if (diagnostics.length > 0) {
+          throw new Error(`Parallel build still has TypeScript errors after repair:\n${diagnostics.join('\n')}`)
+        }
+        lastInteractionId = repairInteraction.id
+      }
+
+      timings.totalMs = Math.round(performance.now() - startedAt)
+      console.log(
+        `[ArgonOrchestrator] Parallel world generation completed in ${timings.totalMs}ms (plan ${timings.planMs}ms, builders ${timings.buildersMs}ms, typecheck ${timings.typecheckMs}ms${timings.repairMs ? `, repair ${timings.repairMs}ms` : ''}).`,
+      )
+      this.emit({
+        phase: 'synthesized',
+        message: `Initial world synthesized in ${timings.totalMs}ms (plan ${timings.planMs}ms, parallel builders ${timings.buildersMs}ms).`,
+        durationMs: timings.totalMs,
+        timings,
+      })
+      return {
+        files,
+        interactionId: lastInteractionId,
+        diagnosis: `Built in ${timings.totalMs}ms via planner + 3 parallel builders.`,
+        timings,
+      }
+    } catch (parallelError) {
+      const reason = parallelError instanceof Error ? parallelError.message : String(parallelError)
+      this.emit({
+        phase: 'synthesizing',
+        message: `Parallel planner/builders failed (${reason}); falling back to single-call generation…`,
+      })
+      return this.generateSingleCallWorld(goal, skillMarkdown, validate, timings, startedAt)
+    }
   }
 
   private async streamFastCritique(
@@ -570,18 +1004,33 @@ export class ArgonOrchestrator {
   async runManagedAgentCritique(
     prompt: string,
     previousInteractionId?: string,
+    options: { video?: UploadedFileHandle; timeoutMs?: number; iteration?: number } = {},
   ): Promise<{ id: string; text: string }> {
     const chainedAgentId = resolveChainedInteractionId(previousInteractionId, 'agent')
+    const timeoutMs = options.timeoutMs ?? this.managedAgentTimeoutMs
+    const input = options.video?.uri
+      ? [
+          { type: 'video' as const, uri: options.video.uri, mime_type: options.video.mimeType ?? 'video/webm' },
+          { type: 'text' as const, text: prompt },
+        ]
+      : prompt
     const interaction = await this.ai.interactions.create({
       agent: managedAgent,
       environment: 'remote',
       ...(chainedAgentId ? { previous_interaction_id: chainedAgentId } : {}),
-      input: prompt,
+      input,
       background: true,
     })
     interactionKinds.set(interaction.id, 'agent')
-    const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique')
-    return { id: interaction.id, text: extractInteractionText(completed) }
+    const completed = await this.waitForInteraction(interaction.id, 'Managed Agent critique', timeoutMs)
+    const text = extractInteractionText(completed).trim()
+    if (!text) {
+      throw new Error('Managed Agent critique returned empty output')
+    }
+    if (options.iteration !== undefined) {
+      this.emitCritiqueText(options.iteration, text, true)
+    }
+    return { id: interaction.id, text }
   }
 
   async critiqueAndPatchWorld(
@@ -606,12 +1055,33 @@ export class ArgonOrchestrator {
       const skillMarkdown = await loadLearnedSkill(this.skillFilePath)
 
       const critiqueStart = performance.now()
-      const critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
+      const critiquePrompt = buildCritiquePrompt(input, compactTelemetry)
+      let critiqueText: string
+      try {
+        const agentCritique = await this.runManagedAgentCritique(
+          critiquePrompt,
+          input.previousInteractionId,
+          {
+            video: activeVideo,
+            timeoutMs: this.managedAgentTimeoutMs,
+            iteration: input.iteration,
+          },
+        )
+        critiqueText = agentCritique.text
+      } catch (agentError) {
+        const reason = agentError instanceof Error ? agentError.message : String(agentError)
+        this.emit({
+          phase: 'critiquing',
+          message: `Managed Agent critique unavailable (${reason}); falling back to streamed model critique…`,
+          iteration: input.iteration,
+        })
+        critiqueText = await this.streamFastCritique(activeVideo, compactTelemetry, input)
+      }
       timings.critiqueMs = Math.round(performance.now() - critiqueStart)
 
       this.emit({
         phase: 'patching',
-        message: 'Synthesizing physics patch from streamed critique…',
+        message: 'Synthesizing physics patch from critique…',
         iteration: input.iteration,
         diagnosis: critiqueText,
       })
@@ -627,7 +1097,7 @@ export class ArgonOrchestrator {
         response_mime_type: 'application/json',
         response_format: patchResponseSchema,
         generation_config: {
-          max_output_tokens: 65_536,
+          max_output_tokens: defaultWorldMaxOutputTokens,
           thinking_level: 'low',
         },
         system_instruction: 'You patch Three.js and Rapier level modules for the Argon engine. Return only the files in src/generated/ that changed matching the JSON schema.',
@@ -684,7 +1154,7 @@ export class ArgonOrchestrator {
       response_mime_type: 'application/json',
       response_format: patchResponseSchema,
       generation_config: {
-        max_output_tokens: 65_536,
+        max_output_tokens: defaultWorldMaxOutputTokens,
         thinking_level: 'low',
       },
     })
@@ -727,7 +1197,7 @@ export class ArgonOrchestrator {
       response_mime_type: 'application/json',
       response_format: patchResponseSchema,
       generation_config: {
-        max_output_tokens: 65_536,
+        max_output_tokens: defaultWorldMaxOutputTokens,
         thinking_level: 'low',
       },
     })
@@ -769,7 +1239,7 @@ export class ArgonOrchestrator {
         input: `${originalPrompt}\n\nCompiler diagnostics from the proposed files (repair once):\n${diagnostics.join('\n')}\nReturn only the corrected changed file set as the required JSON object.`,
         response_mime_type: 'application/json',
         response_format: patchResponseSchema,
-        generation_config: { max_output_tokens: 65_536, thinking_level: 'low' },
+        generation_config: { max_output_tokens: defaultWorldMaxOutputTokens, thinking_level: 'low' },
       })
       interactionKinds.set(repair.id, 'model')
       const completed = await this.waitForInteraction(repair.id, 'TypeScript repair pass')
@@ -789,11 +1259,11 @@ export class ArgonOrchestrator {
     }
   }
 
-  private async waitForInteraction(id: string, label: string) {
+  private async waitForInteraction(id: string, label: string, timeoutMs = 20 * 60_000) {
     const seenSteps = new Set<string>()
-    const deadline = Date.now() + 20 * 60_000
+    const deadline = Date.now() + timeoutMs
     for (;;) {
-      if (Date.now() > deadline) throw new Error(`${label} exceeded the 20-minute polling limit`)
+      if (Date.now() > deadline) throw new Error(`${label} exceeded the ${Math.round(timeoutMs / 1000)}s polling limit`)
       const interaction = await this.ai.interactions.get(id)
       for (const step of interaction.steps ?? []) {
         if (!['code_execution_call', 'code_execution_result', 'function_call', 'function_result', 'mcp_server_tool_call', 'mcp_server_tool_result'].includes(step.type)) continue
@@ -839,3 +1309,4 @@ function parsePatch(output: string): { files: GeneratedFile[]; diagnosis?: strin
   })
   return { files, diagnosis: typeof value.diagnosis === 'string' ? value.diagnosis : undefined, skillContent: typeof value.skillContent === 'string' ? value.skillContent.slice(0, 64000) : undefined }
 }
+
