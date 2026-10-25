@@ -8,17 +8,19 @@ import type { PlaytestFailedMetadata } from '../src/shared/protocol.js'
 /**
  * Live mode for the hosted build. The browser runs the playtest loop and calls this function for
  * each Gemini step; progress streams back as newline-delimited JSON so the critique appears as it
- * is written. The Gemini key never leaves the server. A shared passcode keeps a public link from
- * spending the key.
+ * is written. The Gemini key never leaves the server. Setting PATCHWORLD_PASSCODE keeps a public
+ * link from spending the key; without it, live mode is open.
  */
 
 export const config = { maxDuration: 300 }
 
 const maxBodyBytes = 4_400_000
 
+/** With no PATCHWORLD_PASSCODE set, live mode is open to anyone who has the link. */
 function passcodeAccepted(given: string | null): boolean {
   const expected = process.env.PATCHWORLD_PASSCODE
-  if (!expected || !given) return false
+  if (!expected) return true
+  if (!given) return false
   const a = Buffer.from(given)
   const b = Buffer.from(expected)
   return a.length === b.length && timingSafeEqual(a, b)
@@ -51,7 +53,7 @@ const text = (value: unknown, max: number) => (typeof value === 'string' ? value
 const optionalText = (value: unknown, max: number) => (typeof value === 'string' && value ? value.slice(0, max) : undefined)
 
 export async function POST(request: Request): Promise<Response> {
-  if (!process.env.GEMINI_API_KEY || !process.env.PATCHWORLD_PASSCODE) {
+  if (!process.env.GEMINI_API_KEY) {
     return new Response('Live mode is not configured on this deployment.', { status: 503 })
   }
   if (!passcodeAccepted(request.headers.get('x-patchworld-passcode'))) return new Response('Passcode required.', { status: 401 })

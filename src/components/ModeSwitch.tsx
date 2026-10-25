@@ -14,8 +14,8 @@ export function ModeSwitch({ busy }: { busy: boolean }) {
   }, [live])
   const useLive = (event: FormEvent) => {
     event.preventDefault()
-    if (!passcode.trim()) return
-    setLivePasscode(passcode.trim())
+    // An empty passcode works when the deployment has none set.
+    setLivePasscode(passcode.trim() || 'open')
     setLive(true)
     setOpen(false)
     setPasscode('')
@@ -31,11 +31,11 @@ export function ModeSwitch({ busy }: { busy: boolean }) {
     </button>
     {open && <div className="mode-popover glass-panel" role="dialog" aria-label="Choose mode">
       <p><b>Demo</b> replays a recorded catapult run in your browser. Free, no setup.</p>
-      <p><b>Live</b> builds any world you describe with Gemini. It needs the team passcode.</p>
+      <p><b>Live</b> builds any world you describe with Gemini. Enter the team passcode if this site has one.</p>
       <form onSubmit={useLive} className="mode-form">
         <label htmlFor="live-passcode" className="sr-only">Team passcode</label>
-        <input id="live-passcode" ref={inputRef} type="password" autoComplete="off" placeholder="Team passcode" value={passcode} onChange={(e) => setPasscode(e.target.value)} />
-        <button type="submit" disabled={!passcode.trim()}>Use live</button>
+        <input id="live-passcode" ref={inputRef} type="password" autoComplete="off" placeholder="Passcode (if set)" value={passcode} onChange={(e) => setPasscode(e.target.value)} />
+        <button type="submit">Use live</button>
       </form>
       {live && <button className="mode-back" onClick={useDemo}>Back to demo</button>}
     </div>}
