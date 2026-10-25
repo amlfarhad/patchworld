@@ -357,7 +357,7 @@ test('critiqueAndPatchWorld uses Managed Agent critique output when agent succee
   assert.ok(events.some((e) => e.critiqueFinal && e.critiqueText?.includes('vx >= 14.2 m/s')))
 })
 
-test('generateInitialWorld falls back to single-call medium-thinking generation when planner fails, and respects ARGON_WORLD_THINKING', async () => {
+test('generateSingleCallWorld respects ARGON_WORLD_THINKING and generateInitialWorld retries planner on transient failure without single-call fallback', async () => {
   process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key'
   assert.equal(resolveWorldThinkingLevel({}), 'medium')
   assert.equal(resolveWorldThinkingLevel({ ARGON_WORLD_THINKING: 'low' }), 'low')
@@ -402,7 +402,7 @@ test('generateInitialWorld falls back to single-call medium-thinking generation 
       },
     }
 
-    const result = await orchestrator.generateInitialWorld('Knock the tower down', async () => [])
+    const result = await orchestrator.generateSingleCallWorld('Knock the tower down', skillText, async () => [])
     assert.equal(capturedParams?.response_mime_type, 'application/json')
     assert.deepEqual(capturedParams?.response_format, patchResponseSchema)
     assert.deepEqual(capturedParams?.generation_config, {

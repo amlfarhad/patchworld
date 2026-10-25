@@ -69,9 +69,9 @@ export const worldPlanSchema = {
         type: 'object',
         properties: {
           name: { type: 'string' },
-          owner: { type: 'string', enum: ['scene', 'mechanics'] },
-          bodyType: { type: 'string', enum: ['fixed', 'dynamic', 'kinematicPosition'] },
-          shape: { type: 'string', enum: ['box', 'ball', 'capsule'] },
+          owner: { type: 'string' },
+          bodyType: { type: 'string' },
+          shape: { type: 'string' },
           position: { type: 'array', items: { type: 'number' } },
           size: { type: 'array', items: { type: 'number' } },
           role: { type: 'string' },
@@ -93,7 +93,7 @@ export const worldPlanSchema = {
     goal: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['below-y', 'above-y', 'in-region', 'near-point'] },
+        type: { type: 'string' },
         body: { type: 'string' },
         y: { type: 'number' },
         min: { type: 'array', items: { type: 'number' } },
@@ -784,22 +784,36 @@ export class ArgonOrchestrator {
 
   private async runPlanner(goal: string, skillMarkdown: string): Promise<{ spec: WorldPlanSpec; interactionId: string }> {
     const planPrompt = buildWorldPlanPrompt(goal, skillMarkdown)
-    const interaction = await this.ai.interactions.create({
-      model,
-      background: true,
-      input: planPrompt,
-      response_mime_type: 'application/json',
-      response_format: worldPlanSchema,
-      generation_config: {
-        max_output_tokens: 8_192,
-        thinking_level: 'low',
-      },
-      system_instruction: 'You are the fast level planner for the Argon 3D physics engine. Return only a valid JSON specification with no code.',
-    })
-    interactionKinds.set(interaction.id, 'model')
-    const completed = await this.waitForInteraction(interaction.id, 'World planner')
-    const spec = parseWorldPlan(extractInteractionText(completed))
-    return { spec, interactionId: interaction.id }
+    let lastError: unknown
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const interaction = await this.ai.interactions.create({
+          model,
+          background: true,
+          input: planPrompt,
+          response_mime_type: 'application/json',
+          ...(attempt === 1 ? { response_format: worldPlanSchema } : {}),
+          generation_config: {
+            max_output_tokens: 32_768,
+            thinking_level: 'low',
+          },
+          system_instruction: 'You are the fast level planner for the Argon 3D physics engine. Return only a valid JSON specification with no code.',
+        })
+        interactionKinds.set(interaction.id, 'model')
+        const completed = await this.waitForInteraction(interaction.id, 'World planner')
+        const spec = parseWorldPlan(extractInteractionText(completed))
+        return { spec, interactionId: interaction.id }
+      } catch (error) {
+        lastError = error
+        if (attempt < 3) {
+          this.emit({
+            phase: 'synthesizing',
+            message: `Planner attempt ${attempt} encountered a transient API error; retrying planner immediately…`,
+          })
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
   }
 
   private async runModuleBuilder(
@@ -809,29 +823,43 @@ export class ArgonOrchestrator {
     skillMarkdown: string,
   ): Promise<{ file: GeneratedFile; interactionId: string }> {
     const builderPrompt = buildModuleBuilderPrompt(targetPath, goal, spec, skillMarkdown)
-    const interaction = await this.ai.interactions.create({
-      model,
-      background: true,
-      input: builderPrompt,
-      response_mime_type: 'application/json',
-      response_format: patchResponseSchema,
-      generation_config: {
-        max_output_tokens: 32_768,
-        thinking_level: 'low',
-      },
-      system_instruction: `You are the parallel module builder for ${targetPath}. Follow the shared 3-file TypeScript contract and return only ${targetPath} in the JSON files array.`,
-    })
-    interactionKinds.set(interaction.id, 'model')
-    const completed = await this.waitForInteraction(interaction.id, `Builder ${basename(targetPath)}`)
-    const parsed = parsePatch(extractInteractionText(completed))
-    const matching = parsed.files.find((file) => file.path === targetPath) ?? parsed.files[0]
-    if (!matching || !matching.content.trim()) {
-      throw new Error(`Builder for ${targetPath} returned no file content`)
+    let lastError: unknown
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const interaction = await this.ai.interactions.create({
+          model,
+          background: true,
+          input: builderPrompt,
+          response_mime_type: 'application/json',
+          ...(attempt < 3 ? { response_format: patchResponseSchema } : {}),
+          generation_config: {
+            max_output_tokens: 32_768,
+            thinking_level: 'low',
+          },
+          system_instruction: `You are the parallel module builder for ${targetPath}. Follow the shared 3-file TypeScript contract and return only ${targetPath} in the JSON files array.`,
+        })
+        interactionKinds.set(interaction.id, 'model')
+        const completed = await this.waitForInteraction(interaction.id, `Builder ${basename(targetPath)}`)
+        const parsed = parsePatch(extractInteractionText(completed))
+        const matching = parsed.files.find((file) => file.path === targetPath) ?? parsed.files[0]
+        if (!matching || !matching.content.trim()) {
+          throw new Error(`Builder for ${targetPath} returned no file content`)
+        }
+        return {
+          file: { path: targetPath, content: matching.content },
+          interactionId: interaction.id,
+        }
+      } catch (error) {
+        lastError = error
+        if (attempt < 3) {
+          this.emit({
+            phase: 'synthesizing',
+            message: `Builder ${basename(targetPath)} attempt ${attempt} encountered a transient API error; retrying ${basename(targetPath)} immediately…`,
+          })
+        }
+      }
     }
-    return {
-      file: { path: targetPath, content: matching.content },
-      interactionId: interaction.id,
-    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
   }
 
   async generateInitialWorld(goal: string, validate: (files: GeneratedFile[]) => Promise<string[]>): Promise<GeneratedPatch> {
@@ -843,93 +871,84 @@ export class ArgonOrchestrator {
       return this.generateSingleCallWorld(goal, skillMarkdown, validate, timings, startedAt)
     }
 
-    try {
-      this.emit({ phase: 'synthesizing', message: 'Planning level layout, named bodies, controls, and file ownership…' })
-      const planStart = performance.now()
-      const { spec } = await this.runPlanner(goal, skillMarkdown)
-      timings.planMs = Math.round(performance.now() - planStart)
+    this.emit({ phase: 'synthesizing', message: 'Planning level layout, named bodies, controls, and file ownership…' })
+    const planStart = performance.now()
+    const { spec } = await this.runPlanner(goal, skillMarkdown)
+    timings.planMs = Math.round(performance.now() - planStart)
 
+    this.emit({
+      phase: 'synthesizing',
+      message: `Plan ready in ${timings.planMs}ms; running 3 parallel module builders (scene, mechanics, activeLevel)…`,
+    })
+    const buildersStart = performance.now()
+    const builderResults = await Promise.all(
+      BUILDER_FILE_PATHS.map((targetPath) => this.runModuleBuilder(targetPath, goal, spec, skillMarkdown)),
+    )
+    timings.buildersMs = Math.round(performance.now() - buildersStart)
+    timings.synthesisMs = timings.planMs + timings.buildersMs
+
+    let files = builderResults.map((result) => result.file)
+    let lastInteractionId = builderResults[builderResults.length - 1]!.interactionId
+
+    const typecheckStart = performance.now()
+    let diagnostics = await validate(files)
+    timings.typecheckMs = Math.round(performance.now() - typecheckStart)
+
+    if (diagnostics.length > 0) {
+      const repairStart = performance.now()
+      const failingFiles = identifyFailingFiles(files, diagnostics)
       this.emit({
-        phase: 'synthesizing',
-        message: `Plan ready in ${timings.planMs}ms; running 3 parallel module builders (scene, mechanics, activeLevel)…`,
+        phase: 'typecheck-retry',
+        message: `TypeScript reported errors in ${failingFiles.map((f) => basename(f.path)).join(', ')}; running one targeted repair pass…`,
       })
-      const buildersStart = performance.now()
-      const builderResults = await Promise.all(
-        BUILDER_FILE_PATHS.map((targetPath) => this.runModuleBuilder(targetPath, goal, spec, skillMarkdown)),
-      )
-      timings.buildersMs = Math.round(performance.now() - buildersStart)
-      timings.synthesisMs = timings.planMs + timings.buildersMs
-
-      let files = builderResults.map((result) => result.file)
-      let lastInteractionId = builderResults[builderResults.length - 1]!.interactionId
-
-      const typecheckStart = performance.now()
-      let diagnostics = await validate(files)
-      timings.typecheckMs = Math.round(performance.now() - typecheckStart)
-
+      const repairPrompt = [
+        `Goal: ${goal}`,
+        `Planner JSON specification:\n${JSON.stringify(spec, null, 2)}`,
+        multiFileModuleContract.trim(),
+        levelContract.trim(),
+        `Failing file(s) to repair (resend ONLY these corrected file(s)):\n${JSON.stringify(failingFiles)}`,
+        `Compiler diagnostics:\n${diagnostics.join('\n')}`,
+        'Return only the repaired failing file(s) as the required JSON object.',
+      ].join('\n\n')
+      const repairInteraction = await this.ai.interactions.create({
+        model,
+        background: true,
+        input: repairPrompt,
+        response_mime_type: 'application/json',
+        response_format: patchResponseSchema,
+        generation_config: {
+          max_output_tokens: defaultWorldMaxOutputTokens,
+          thinking_level: 'low',
+        },
+        system_instruction: 'Repair only the failing TypeScript file(s) so all three generated modules compile cleanly together.',
+      })
+      interactionKinds.set(repairInteraction.id, 'model')
+      const completedRepair = await this.waitForInteraction(repairInteraction.id, 'Parallel builder repair pass')
+      const repairedPatch = parsePatch(extractInteractionText(completedRepair))
+      files = mergeWithCurrentFiles(repairedPatch.files, files)
+      diagnostics = await validate(files)
+      timings.repairMs = Math.round(performance.now() - repairStart)
       if (diagnostics.length > 0) {
-        const repairStart = performance.now()
-        const failingFiles = identifyFailingFiles(files, diagnostics)
-        this.emit({
-          phase: 'typecheck-retry',
-          message: `TypeScript reported errors in ${failingFiles.map((f) => basename(f.path)).join(', ')}; running one targeted repair pass…`,
-        })
-        const repairPrompt = [
-          `Goal: ${goal}`,
-          `Planner JSON specification:\n${JSON.stringify(spec, null, 2)}`,
-          multiFileModuleContract.trim(),
-          levelContract.trim(),
-          `Failing file(s) to repair (resend ONLY these corrected file(s)):\n${JSON.stringify(failingFiles)}`,
-          `Compiler diagnostics:\n${diagnostics.join('\n')}`,
-          'Return only the repaired failing file(s) as the required JSON object.',
-        ].join('\n\n')
-        const repairInteraction = await this.ai.interactions.create({
-          model,
-          background: true,
-          input: repairPrompt,
-          response_mime_type: 'application/json',
-          response_format: patchResponseSchema,
-          generation_config: {
-            max_output_tokens: defaultWorldMaxOutputTokens,
-            thinking_level: 'low',
-          },
-          system_instruction: 'Repair only the failing TypeScript file(s) so all three generated modules compile cleanly together.',
-        })
-        interactionKinds.set(repairInteraction.id, 'model')
-        const completedRepair = await this.waitForInteraction(repairInteraction.id, 'Parallel builder repair pass')
-        const repairedPatch = parsePatch(extractInteractionText(completedRepair))
-        files = mergeWithCurrentFiles(repairedPatch.files, files)
-        diagnostics = await validate(files)
-        timings.repairMs = Math.round(performance.now() - repairStart)
-        if (diagnostics.length > 0) {
-          throw new Error(`Parallel build still has TypeScript errors after repair:\n${diagnostics.join('\n')}`)
-        }
-        lastInteractionId = repairInteraction.id
+        throw new Error(`Parallel build still has TypeScript errors after repair:\n${diagnostics.join('\n')}`)
       }
+      lastInteractionId = repairInteraction.id
+    }
 
-      timings.totalMs = Math.round(performance.now() - startedAt)
-      console.log(
-        `[ArgonOrchestrator] Parallel world generation completed in ${timings.totalMs}ms (plan ${timings.planMs}ms, builders ${timings.buildersMs}ms, typecheck ${timings.typecheckMs}ms${timings.repairMs ? `, repair ${timings.repairMs}ms` : ''}).`,
-      )
-      this.emit({
-        phase: 'synthesized',
-        message: `Initial world synthesized in ${timings.totalMs}ms (plan ${timings.planMs}ms, parallel builders ${timings.buildersMs}ms).`,
-        durationMs: timings.totalMs,
-        timings,
-      })
-      return {
-        files,
-        interactionId: lastInteractionId,
-        diagnosis: `Built in ${timings.totalMs}ms via planner + 3 parallel builders.`,
-        timings,
-      }
-    } catch (parallelError) {
-      const reason = parallelError instanceof Error ? parallelError.message : String(parallelError)
-      this.emit({
-        phase: 'synthesizing',
-        message: `Parallel planner/builders failed (${reason}); falling back to single-call generation…`,
-      })
-      return this.generateSingleCallWorld(goal, skillMarkdown, validate, timings, startedAt)
+    timings.totalMs = Math.round(performance.now() - startedAt)
+    console.log(
+      `[ArgonOrchestrator] Parallel world generation completed in ${timings.totalMs}ms (plan ${timings.planMs}ms, builders ${timings.buildersMs}ms, typecheck ${timings.typecheckMs}ms${timings.repairMs ? `, repair ${timings.repairMs}ms` : ''}).`,
+    )
+    this.emit({
+      phase: 'synthesized',
+      message: `Initial world synthesized in ${timings.totalMs}ms (plan ${timings.planMs}ms, parallel builders ${timings.buildersMs}ms).`,
+      durationMs: timings.totalMs,
+      timings,
+    })
+    return {
+      files,
+      interactionId: lastInteractionId,
+      diagnosis: `Built in ${timings.totalMs}ms via planner + 3 parallel builders.`,
+      timings,
     }
   }
 
