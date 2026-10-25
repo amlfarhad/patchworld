@@ -33,7 +33,7 @@ export async function loadMockScript(nameOrPath: string, projectRoot: string): P
   const raw: unknown = JSON.parse(await readFile(scriptPath, 'utf8'))
   const steps = (raw as { steps?: unknown } | null)?.steps
   if (!Array.isArray(steps) || steps.length === 0) throw new Error(`Mock script ${scriptPath} needs a non-empty steps array`)
-  const baseDir = dirname(scriptPath)
+  const baseDir = dirname(resolve(scriptPath))
   const loaded = await Promise.all(steps.map(async (step: unknown, index): Promise<MockStep> => {
     const entry = step as { files?: unknown; diagnosis?: unknown; skillContent?: unknown } | null
     if (!entry?.files || typeof entry.files !== 'object') throw new Error(`Mock script step ${index + 1} needs a files map`)

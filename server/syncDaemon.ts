@@ -145,6 +145,7 @@ async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = 
   }
   if (epoch !== goalEpoch) return null
   const changes = await describeChanges(safeFiles)
+  if (epoch !== goalEpoch) return null
   await writeBatch(safeFiles)
   const paths = safeFiles.map(({ path }) => path)
   sendToRole('agent', { type: 'patch-applied', runId, files: paths })
@@ -154,13 +155,15 @@ async function validateAndApply(files: GeneratedFile[], runId?: string, epoch = 
 
 /** Writes an orchestrator patch as the next iteration and starts waiting for the browser to mount it. */
 async function applyIterationPatch(patch: GeneratedPatch, runId: string | undefined, epoch: number): Promise<boolean> {
-  iteration += 1
-  awaitingLevelMount = true
   const applied = await validateAndApply(patch.files, runId, epoch)
+  if (epoch !== goalEpoch) return false
   if (!applied) {
-    awaitingLevelMount = false
+    activeGoal = ''
+    emitProgress({ phase: 'error', message: 'The generated patch failed validation, so the loop stopped. Start the goal again or take over.', iteration })
     return false
   }
+  iteration += 1
+  awaitingLevelMount = true
   armMountWatchdog(epoch)
   history = [...history, {
     iteration,
@@ -243,7 +246,7 @@ async function critiqueFailedRun(packet: Awaited<ReturnType<typeof savePlaytestP
     return
   }
   try {
-    emitProgress({ phase: 'critiquing', message: 'Managed Agent sandbox is reviewing the video and frame telemetry.', iteration })
+    emitProgress({ phase: 'critiquing', message: mockScript ? 'Mock mode: replaying the scripted critique (no video is analyzed).' : 'Managed Agent sandbox is reviewing the video and frame telemetry.', iteration })
     const currentFiles = await readCurrentGeneratedFiles()
     const patch = await createOrchestrator(epoch).critiqueAndPatchWorld({
       videoBytes: packet.videoBytes,
@@ -268,8 +271,13 @@ async function handleMountFailure(error: string, stack?: string): Promise<void> 
   sendToRole('agent', { type: 'level-mount-failed', error, stack })
   const wasAwaiting = awaitingLevelMount
   awaitingLevelMount = false
+  if (!wasAwaiting) {
+    // Not a patch the loop is waiting on: a crash after Reset level (show it), or a duplicate report during a repair (ignore it).
+    if (!activeGoal) emitProgress({ phase: 'error', message: `The level threw while loading: ${error}`, iteration })
+    return
+  }
   settleLatestIteration('mount-failed', { failureReason: error })
-  if (!wasAwaiting || !activeGoal) {
+  if (!activeGoal) {
     emitProgress({ phase: 'error', message: `Generated level failed to load: ${error}`, iteration })
     return
   }
@@ -477,7 +485,7 @@ async function handleBrowserMessage(
       sendJson(socket, { type: 'playtest-accepted', runId: packet.metadata.runId })
       forwardBinaryToRole('agent', rawDataToBytes(data))
       sendToRole('agent', { type: 'playtest-artifact-saved', runId: packet.metadata.runId })
-      if (isEngine(socket)) {
+      if (isEngine(socket) && history.at(-1)?.outcome === 'pending') {
         settleLatestIteration('failed', { runId: packet.metadata.runId, failureReason: packet.metadata.failureReason })
         void critiqueFailedRun(packet)
       }
@@ -494,7 +502,7 @@ async function handleBrowserMessage(
     const message = parseJsonMessage(data)
     if (message.type === 'playtest-passed') {
       sendToRole('agent', message)
-      if (!isEngine(socket)) return
+      if (!isEngine(socket) || history.at(-1)?.outcome !== 'pending') return
       settleLatestIteration('passed', { runId: typeof message.runId === 'string' ? message.runId : undefined })
       activeGoal = ''
       emitProgress({ phase: 'complete', message: 'Goal reached. Human controls are available.' })
@@ -503,6 +511,7 @@ async function handleBrowserMessage(
       activeGoal = ''
       awaitingLevelMount = false
       clearMountWatchdog()
+      settleLatestIteration('abandoned')
       emitProgress({ phase: 'human', message: 'Autonomous loop paused. Human control enabled.' })
     }
     else if (message.type === 'start-goal' && typeof message.goal === 'string') void startGoal(socket, message.goal)
@@ -554,7 +563,7 @@ websocketServer.on('connection', (socket) => {
         }
         record = { socket, role: message.role }
         clients.add(record)
-        sendJson(socket, { type: 'registered', role: record.role })
+        sendJson(socket, { type: 'registered', role: record.role, mock: Boolean(mockScript) })
         if (record.role === 'browser') {
           void publishSkill(socket)
           if (history.length > 0) publishHistory(socket)

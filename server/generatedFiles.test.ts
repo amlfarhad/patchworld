@@ -144,3 +144,23 @@ test('evaluateLevelGoal checks declared goal against named body positions', () =
 })
 
 
+
+test('preflight ignores unused locals so a working level does not cost a repair pass', async () => {
+  const files = validateGeneratedFiles([{
+    path: 'src/generated/activeLevel.ts',
+    content: `
+      import type { GeneratedLevelModule } from '../engine/types'
+      export const buildWorld: GeneratedLevelModule['buildWorld'] = (scene, world, bodies, events) => {
+        const unusedHeight = 3
+        return {
+          stepBotAndRules: () => ({ botState: 'ready', goalReached: false }),
+          stepHumanAndRules: () => ({ botState: 'human', goalReached: false }),
+          controls: [],
+          goal: { type: 'below-y', body: 'ball', y: 0 },
+          dispose: () => undefined,
+        }
+      }
+    `,
+  }])
+  assert.deepEqual(await checkGeneratedTypeScript(files, process.cwd()), [])
+})

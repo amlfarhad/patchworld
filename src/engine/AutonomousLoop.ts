@@ -27,7 +27,7 @@ export class AutonomousLoop {
   private readonly canvas: HTMLCanvasElement
   private readonly socketUrl: string
 
-  constructor(canvas: HTMLCanvasElement, socketUrl = 'ws://127.0.0.1:4174') {
+  constructor(canvas: HTMLCanvasElement, socketUrl: string = import.meta.env.VITE_ARGON_SYNC_URL ?? 'ws://127.0.0.1:4174') {
     this.canvas = canvas
     this.socketUrl = socketUrl
   }
@@ -160,7 +160,7 @@ export class AutonomousLoop {
       this.setState('error')
       window.dispatchEvent(new CustomEvent('argon:goal-error', { detail: message.message }))
     } else if (message.type === 'registered') {
-      window.dispatchEvent(new CustomEvent('argon:connection', { detail: true }))
+      window.dispatchEvent(new CustomEvent('argon:connection', { detail: { connected: true, mock: Boolean(message.mock) } }))
       if (this.unreportedMount) {
         this.unreportedMount = false
         this.send({ type: 'level-mounted' })

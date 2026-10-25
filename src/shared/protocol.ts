@@ -18,7 +18,7 @@ export interface PlaytestPassedMessage {
 export interface IterationEntry {
   iteration: number
   /** `pending` until the playtest of this iteration's level finishes. */
-  outcome: 'pending' | 'passed' | 'failed' | 'mount-failed'
+  outcome: 'pending' | 'passed' | 'failed' | 'mount-failed' | 'abandoned'
   /** Generated files this iteration wrote. */
   files: string[]
   /** The critique that produced this iteration's patch (absent for the first draft). */
@@ -37,7 +37,8 @@ export interface FileChange {
 }
 
 export type DaemonMessage =
-  | { type: 'registered'; role: 'browser' | 'agent' }
+  /** `mock` is true when the daemon replays a scripted run instead of calling Gemini. */
+  | { type: 'registered'; role: 'browser' | 'agent'; mock?: boolean }
   | { type: 'progress'; phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
   | { type: 'video-preview'; runId: string; videoUrl: string }
   | { type: 'start-goal-accepted'; goal: string }

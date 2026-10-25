@@ -19,13 +19,15 @@ export interface SandboxState {
   /** The mounted level's declared controls and goal, how many times a level has mounted, and how a person's play ended. */
   controls: ControlBinding[]; levelGoal: LevelGoal | null; levelMounts: number; humanResult: HumanResult | null;
   skillContent: string; skillUpdated: string; goal: string; error: string; human: boolean;
+  /** The daemon replays a scripted run (mock mode) instead of calling Gemini. */
+  mock: boolean;
 }
 type ProgressDetail = { phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
 const idleCritique: Critique = { iteration: 0, text: '', status: 'idle', updatedAt: '' }
 const initial: SandboxState = {
   connected: false, ready: false, hasLevel: false, phase: 'idle', message: 'Ready for your first world',
   frame: 0, frameLimit: 240, bodyCount: 0, iteration: 0, diagnosis: '', diagnosisTime: '',
-  critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, controls: [], levelGoal: null, levelMounts: 0, humanResult: null, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false,
+  critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, controls: [], levelGoal: null, levelMounts: 0, humanResult: null, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false, mock: false,
 }
 
 // Daemons that only send the final `diagnosis` still drive the critique: `critiquing` means the agent is watching the replay.
@@ -57,7 +59,11 @@ export function useSandbox() {
       const listener: EventListener = (e) => handler((e as CustomEvent<T>).detail)
       window.addEventListener(name, listener); bindings.push([name, listener])
     }
-    listen<boolean>('argon:connection', (connected) => setState((s) => ({ ...s, connected, logs: log(s, connected ? 'Local sync connection established.' : 'Sync disconnected. Reconnecting…') })))
+    listen<boolean | { connected: boolean; mock?: boolean }>('argon:connection', (detail) => setState((s) => {
+      const connected = typeof detail === 'boolean' ? detail : detail.connected
+      const mock = typeof detail === 'boolean' ? s.mock : Boolean(detail.mock)
+      return { ...s, connected, mock, logs: log(s, connected ? (mock ? 'Connected to the sync daemon in mock mode (scripted replay, no Gemini).' : 'Local sync connection established.') : 'Sync disconnected. Reconnecting…') }
+    }))
     listen<{ hasLevel: boolean; bodyCount: number; controls?: ControlBinding[]; goal?: LevelGoal }>('argon:level-mounted', ({ hasLevel, bodyCount, controls, goal }) => setState((s) => ({
       ...s, hasLevel, bodyCount, ready: true, controls: controls ?? [], levelGoal: goal ?? null, levelMounts: s.levelMounts + 1, humanResult: null,
       ...(hasLevel ? {} : { human: false, phase: 'idle', frame: 0 }),
