@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { GoogleGenAI } from '@google/genai'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -12,7 +12,9 @@ const critiqueModel = process.env.ARGON_CRITIQUE_MODEL ?? 'gemini-3.8-flash'
 const managedAgent = process.env.ARGON_AGENT ?? 'antigravity-preview-09-2026'
 const pollIntervalMs = 1_000
 const defaultManagedAgentTimeoutMs = 90_000
-const defaultWorldMaxOutputTokens = 65_536
+export const MAX_CONTEXT_WINDOW_TOKENS = 1_048_576
+export const MAX_OUTPUT_TOKENS = Number(process.env.ARGON_MAX_OUTPUT_TOKENS) || 1_048_576
+const defaultWorldMaxOutputTokens = MAX_OUTPUT_TOKENS
 const defaultSkillPath = resolve(process.cwd(), '.agents/SKILL.md')
 
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high'
@@ -166,6 +168,16 @@ export function createCritiqueTextMessage(
   }
 }
 
+export interface ContextTelemetry {
+  promptChars: number
+  contextTokensEstimate: number
+  maxContextTokens: number
+  maxOutputTokens: number
+  thinkingLevel: ThinkingLevel
+  packedFiles: string[]
+  thoughtSummary?: string
+}
+
 export interface OrchestratorEvent {
   phase: string
   message: string
@@ -178,6 +190,8 @@ export interface OrchestratorEvent {
   terminal?: string
   durationMs?: number
   timings?: Record<string, number>
+  contextTelemetry?: ContextTelemetry
+  thoughtSummary?: string
 }
 
 export interface GeneratedPatch {
@@ -186,6 +200,7 @@ export interface GeneratedPatch {
   skillContent?: string
   diagnosis?: string
   timings?: Record<string, number>
+  contextTelemetry?: ContextTelemetry
 }
 
 export interface FailedRunInput {
@@ -226,7 +241,12 @@ Prefer importing ready-made models and helpers from '../engine/assetKit' instead
 - Models (return THREE.Group, take { position?: [x,y,z], scale?: number | [x,y,z], color?: number }):
   createCharacter(opts?), createEnemy(opts?), createTree(opts?), createRock(opts?),
   createCrate(opts?), createCoin(opts?), createItemBlock(opts?), createGoalFlag(opts?),
+  createCastleTower({ position?, scale?, color?, roofColor? }),
   createPlatformTile({ position?, scale?, color?, topColor?, size?: [w,h,d] })
+- VFX & procedural animation helpers:
+  createPooledParticles(scene, maxParticles?) -> { burst(origin, color, count?, speed?), step(dt), dispose() }
+  animateCharacterGroup(group, speed, elapsedSeconds, grounded?)
+  createPBRMaterial({ color, metalness?, roughness?, clearcoat?, bumpKind?: 'stone' | 'wood' | 'metal' | 'tech' })
 - Background scenery instancing:
   scatter(scene, templateGroup, count, { min: [minX, minZ], max: [maxX, maxZ], y?: number, minRadius?: number }, seed?)
 - Physics collider helper:
@@ -325,20 +345,94 @@ Shared 3-file module contract for parallel builders (MUST match these exact expo
 
 export async function loadLearnedSkill(skillFilePath = defaultSkillPath): Promise<string> {
   try {
-    const content = (await readFile(skillFilePath, 'utf8')).trim()
-    return content.slice(0, 64_000)
+    return (await readFile(skillFilePath, 'utf8')).trim()
   } catch {
     return ''
   }
 }
 
+export const ENGINE_CONTEXT_FILES = [
+  'src/engine/types.ts',
+  'src/engine/assetKit.ts',
+  'src/engine/breakageKit.ts',
+  'src/engine/EngineHost.ts',
+  'src/engine/goalEvaluator.ts',
+  'src/engine/controlCheck.ts',
+  'src/engine/TelemetryRecorder.ts',
+  'src/shared/protocol.ts',
+  'src/generated/scene.ts',
+  'src/generated/mechanics.ts',
+  'src/generated/activeLevel.ts',
+  '.agents/SKILL.md',
+  'src/fixtures/catapult-3.ts',
+  'src/fixtures/cached-catapult-04-activeLevel.level',
+  'src/fixtures/cached-bowling-01-scene.level',
+  'src/fixtures/cached-bowling-01-mechanics.level',
+  'src/fixtures/cached-domino-01-activeLevel.level',
+  'src/fixtures/cached-orbital-01-activeLevel.level',
+] as const
+
+let cachedEnginePack: { root: string; text: string; files: string[] } | null = null
+
+export function buildEngineContextPack(projectRoot = process.cwd()): { text: string; files: string[] } {
+  if (cachedEnginePack && cachedEnginePack.root === projectRoot) {
+    return { text: cachedEnginePack.text, files: cachedEnginePack.files }
+  }
+  const chunks: string[] = []
+  const packedFiles: string[] = []
+  for (const relPath of ENGINE_CONTEXT_FILES) {
+    try {
+      const absPath = resolve(projectRoot, relPath)
+      if (!existsSync(absPath)) continue
+      const source = readFileSync(absPath, 'utf8').trim()
+      if (!source) continue
+      packedFiles.push(relPath)
+      chunks.push(`// === FULL ENGINE & WORLD REFERENCE: ${relPath} ===\n${source}`)
+    } catch {
+      // Ignore unreadable optional files
+    }
+  }
+  const text = chunks.length > 0
+    ? `1M-Context Full Engine & Multi-World Architecture Pack (Verbatim TypeScript contracts, AAA procedural kits, & multi-module reference worlds):\n${chunks.join('\n\n')}`
+    : ''
+  cachedEnginePack = { root: projectRoot, text, files: packedFiles }
+  return { text, files: packedFiles }
+}
+
+export function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 3.8))
+}
+
+export function createContextTelemetry(
+  prompt: string,
+  thinkingLevel: ThinkingLevel,
+  maxOutputTokens = defaultWorldMaxOutputTokens,
+  thoughtSummary?: string,
+  projectRoot = process.cwd(),
+): ContextTelemetry {
+  const { files } = buildEngineContextPack(projectRoot)
+  return {
+    promptChars: prompt.length,
+    contextTokensEstimate: estimateTokens(prompt),
+    maxContextTokens: MAX_CONTEXT_WINDOW_TOKENS,
+    maxOutputTokens,
+    thinkingLevel,
+    packedFiles: files,
+    thoughtSummary,
+  }
+}
+
 export function buildWorldGenerationPrompt(goal: string, skillMarkdown = ''): string {
+  const enginePack = buildEngineContextPack()
   const sections = [
     `Create a complete physics sandbox level for this goal: ${goal}`,
     levelContract.trim(),
   ]
   if (isAssetKitAvailable()) {
     sections.push(assetKitGuidance.trim())
+  }
+  if (enginePack.text) {
+    sections.push(enginePack.text)
   }
   if (skillMarkdown.trim()) {
     sections.push(`Learned physics invariants from .agents/SKILL.md (apply these invariants when designing the level):\n${skillMarkdown.trim()}`)
@@ -352,6 +446,7 @@ export function buildWorldPlanPrompt(
   options: { useAssetKit?: boolean } = {},
 ): string {
   const useAssetKit = options.useAssetKit ?? isAssetKitAvailable()
+  const enginePack = buildEngineContextPack()
   const sections = [
     `Plan a 3-file 3D physics level for this goal: ${goal}`,
     'Return ONLY a JSON specification matching the schema (no TypeScript or code):',
@@ -364,6 +459,9 @@ export function buildWorldPlanPrompt(
       ? "Tell the builders in fileOwnership to import models and gameplay helpers from '../engine/assetKit' (createCharacter, createEnemy, createTree, createRock, createCrate, createCoin, createItemBlock, createGoalFlag, createPlatformTile, scatter, createBodyWithCollider, createPlayerController, collectOnce, hitFromBelow) instead of building everything from boxes."
       : "When '../engine/assetKit' is available, builders import models and helpers from '../engine/assetKit' instead of building everything from boxes.",
   ]
+  if (useAssetKit && enginePack.text) {
+    sections.push(enginePack.text)
+  }
   if (skillMarkdown.trim()) {
     sections.push(`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown.trim()}`)
   }
@@ -378,6 +476,7 @@ export function buildModuleBuilderPrompt(
   options: { useAssetKit?: boolean } = {},
 ): string {
   const useAssetKit = options.useAssetKit ?? isAssetKitAvailable()
+  const enginePack = buildEngineContextPack()
   const roleSpecificInstructions =
     targetPath === 'src/generated/scene.ts'
       ? [
@@ -411,6 +510,7 @@ export function buildModuleBuilderPrompt(
     multiFileModuleContract.trim(),
     assetLine,
     levelContract.trim(),
+    ...(useAssetKit && enginePack.text ? [enginePack.text] : []),
     ...(skillMarkdown.trim() ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown.trim()}`] : []),
     `Return ONLY a JSON object with a single file entry: {"files":[{"path":"${targetPath}","content":"..."}]}`,
   ]
@@ -518,6 +618,31 @@ export function extractInteractionText(interaction: {
   }
   if (stepTexts.length > 0) return stepTexts.join('\n')
   return interaction.output_text ?? ''
+}
+
+export function extractInteractionThoughts(interaction: {
+  steps?: Array<{
+    type?: string
+    content?: Array<{ type?: string; text?: string; thought?: boolean }>
+  }>
+}): string {
+  const thoughts: string[] = []
+  for (const step of interaction.steps ?? []) {
+    if (step.type === 'thought' || step.type === 'thinking' || step.type === 'reasoning') {
+      for (const part of step.content ?? []) {
+        if (typeof part.text === 'string' && part.text.trim()) {
+          thoughts.push(part.text.trim())
+        }
+      }
+      continue
+    }
+    for (const part of step.content ?? []) {
+      if ((part.type === 'thought' || part.thought === true) && typeof part.text === 'string' && part.text.trim()) {
+        thoughts.push(part.text.trim())
+      }
+    }
+  }
+  return thoughts.join('\n\n')
 }
 
 export function resolveChainedInteractionId(
@@ -705,6 +830,7 @@ export function buildPatchPrompt(
   skillMarkdown = '',
 ): string {
   const failureReason = input.metadata.failureReason ?? 'Goal not reached'
+  const enginePack = buildEngineContextPack()
   return [
     'Apply the playtest critique below to fix the physics level.',
     'If the failure reason or critique reports dead controls ("Declared controls did nothing: ..."), treat fixing every declared control binding (matching event.code in onPointerOrKey and applying movement/actions in stepHumanAndRules, including both WASD and Arrow keys if declared) as the top priority.',
@@ -717,6 +843,7 @@ export function buildPatchPrompt(
     JSON.stringify(compactTelemetry),
     `Current generated files:\n${JSON.stringify(input.currentFiles)}`,
     ...(skillMarkdown ? [`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown}`] : []),
+    ...(enginePack.text ? [enginePack.text] : []),
     levelContract.trim(),
   ].join('\n\n')
 }
@@ -756,7 +883,12 @@ export class ArgonOrchestrator {
   ): Promise<GeneratedPatch> {
     const thinkingLevel = resolveWorldThinkingLevel()
     const prompt = buildWorldGenerationPrompt(goal, skillMarkdown)
-    this.emit({ phase: 'synthesizing', message: `Synthesizing physics world (single-call, thinking: ${thinkingLevel})…` })
+    const initialContext = createContextTelemetry(prompt, thinkingLevel, defaultWorldMaxOutputTokens)
+    this.emit({
+      phase: 'synthesizing',
+      message: `Synthesizing physics world (single-call, thinking: ${thinkingLevel})…`,
+      contextTelemetry: initialContext,
+    })
     const synthStart = performance.now()
     const interaction = await this.ai.interactions.create({
       model,
@@ -772,15 +904,24 @@ export class ArgonOrchestrator {
     })
     interactionKinds.set(interaction.id, 'model')
     const completed = await this.waitForInteraction(interaction.id, 'Long-decode world generation')
+    const thoughtSummary = extractInteractionThoughts(completed) || undefined
+    const contextTelemetry = createContextTelemetry(prompt, thinkingLevel, defaultWorldMaxOutputTokens, thoughtSummary)
     timings.synthesisMs = Math.round(performance.now() - synthStart)
     const result = await this.parseAndRepair(extractInteractionText(completed), interaction.id, validate, prompt, [], timings)
     timings.totalMs = Math.round(performance.now() - startedAt)
     console.log(`[ArgonOrchestrator] Single-call world generation (thinking=${thinkingLevel}) completed in ${timings.totalMs}ms (synthesis ${timings.synthesisMs}ms).`)
-    this.emit({ phase: 'synthesized', message: `Initial world synthesized in ${timings.totalMs}ms.`, durationMs: timings.totalMs, timings })
-    return { ...result, timings }
+    this.emit({
+      phase: 'synthesized',
+      message: `Initial world synthesized in ${timings.totalMs}ms.`,
+      durationMs: timings.totalMs,
+      timings,
+      contextTelemetry,
+      thoughtSummary,
+    })
+    return { ...result, timings, contextTelemetry }
   }
 
-  private async runPlanner(goal: string, skillMarkdown: string): Promise<{ spec: WorldPlanSpec; interactionId: string }> {
+  private async runPlanner(goal: string, skillMarkdown: string): Promise<{ spec: WorldPlanSpec; interactionId: string; thoughtSummary?: string; prompt: string }> {
     const planPrompt = buildWorldPlanPrompt(goal, skillMarkdown)
     let lastError: unknown
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -792,7 +933,7 @@ export class ArgonOrchestrator {
           response_mime_type: 'application/json',
           ...(attempt === 1 ? { response_format: worldPlanSchema } : {}),
           generation_config: {
-            max_output_tokens: 32_768,
+            max_output_tokens: defaultWorldMaxOutputTokens,
             thinking_level: 'low',
           },
           system_instruction: 'You are the fast level planner for the Argon 3D physics engine. Return only a valid JSON specification with no code.',
@@ -800,7 +941,8 @@ export class ArgonOrchestrator {
         interactionKinds.set(interaction.id, 'model')
         const completed = await this.waitForInteraction(interaction.id, 'World planner')
         const spec = parseWorldPlan(extractInteractionText(completed))
-        return { spec, interactionId: interaction.id }
+        const thoughtSummary = extractInteractionThoughts(completed) || undefined
+        return { spec, interactionId: interaction.id, thoughtSummary, prompt: planPrompt }
       } catch (error) {
         lastError = error
         if (attempt < 3) {
@@ -819,7 +961,7 @@ export class ArgonOrchestrator {
     goal: string,
     spec: WorldPlanSpec,
     skillMarkdown: string,
-  ): Promise<{ file: GeneratedFile; interactionId: string }> {
+  ): Promise<{ file: GeneratedFile; interactionId: string; thoughtSummary?: string; prompt: string }> {
     const builderPrompt = buildModuleBuilderPrompt(targetPath, goal, spec, skillMarkdown)
     let lastError: unknown
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -831,7 +973,7 @@ export class ArgonOrchestrator {
           response_mime_type: 'application/json',
           ...(attempt < 3 ? { response_format: patchResponseSchema } : {}),
           generation_config: {
-            max_output_tokens: 32_768,
+            max_output_tokens: defaultWorldMaxOutputTokens,
             thinking_level: 'low',
           },
           system_instruction: `You are the parallel module builder for ${targetPath}. Follow the shared 3-file TypeScript contract and return only ${targetPath} in the JSON files array.`,
@@ -846,6 +988,8 @@ export class ArgonOrchestrator {
         return {
           file: { path: targetPath, content: matching.content },
           interactionId: interaction.id,
+          thoughtSummary: extractInteractionThoughts(completed) || undefined,
+          prompt: builderPrompt,
         }
       } catch (error) {
         lastError = error
@@ -869,14 +1013,21 @@ export class ArgonOrchestrator {
       return this.generateSingleCallWorld(goal, skillMarkdown, validate, timings, startedAt)
     }
 
-    this.emit({ phase: 'synthesizing', message: 'Planning level layout, named bodies, controls, and file ownership…' })
+    const previewPrompt = buildWorldPlanPrompt(goal, skillMarkdown)
+    const initialContext = createContextTelemetry(previewPrompt, resolveWorldThinkingLevel(), defaultWorldMaxOutputTokens)
+    this.emit({
+      phase: 'synthesizing',
+      message: 'Planning level layout, named bodies, controls, and file ownership…',
+      contextTelemetry: initialContext,
+    })
     const planStart = performance.now()
-    const { spec } = await this.runPlanner(goal, skillMarkdown)
+    const { spec, thoughtSummary: planThoughts, prompt: planPrompt } = await this.runPlanner(goal, skillMarkdown)
     timings.planMs = Math.round(performance.now() - planStart)
 
     this.emit({
       phase: 'synthesizing',
       message: `Plan ready in ${timings.planMs}ms; running 3 parallel module builders (scene, mechanics, activeLevel)…`,
+      thoughtSummary: planThoughts,
     })
     const buildersStart = performance.now()
     const builderResults = await Promise.all(
@@ -887,6 +1038,9 @@ export class ArgonOrchestrator {
 
     let files = builderResults.map((result) => result.file)
     let lastInteractionId = builderResults[builderResults.length - 1]!.interactionId
+    const combinedPrompts = [planPrompt, ...builderResults.map((r) => r.prompt)].join('\n\n')
+    const combinedThoughts = [planThoughts, ...builderResults.map((r) => r.thoughtSummary)].filter(Boolean).join('\n\n') || undefined
+    const contextTelemetry = createContextTelemetry(combinedPrompts, resolveWorldThinkingLevel(), defaultWorldMaxOutputTokens, combinedThoughts)
 
     const typecheckStart = performance.now()
     let diagnostics = await validate(files)
@@ -941,12 +1095,15 @@ export class ArgonOrchestrator {
       message: `Initial world synthesized in ${timings.totalMs}ms (plan ${timings.planMs}ms, parallel builders ${timings.buildersMs}ms).`,
       durationMs: timings.totalMs,
       timings,
+      contextTelemetry,
+      thoughtSummary: combinedThoughts,
     })
     return {
       files,
       interactionId: lastInteractionId,
       diagnosis: `Built in ${timings.totalMs}ms via planner + 3 parallel builders.`,
       timings,
+      contextTelemetry,
     }
   }
 
@@ -961,7 +1118,7 @@ export class ArgonOrchestrator {
       stream: true,
       input: critiquePrompt,
       generation_config: {
-        max_output_tokens: 4_096,
+        max_output_tokens: defaultWorldMaxOutputTokens,
         thinking_level: 'low',
       },
     })
@@ -1305,6 +1462,6 @@ function parsePatch(output: string): { files: GeneratedFile[]; diagnosis?: strin
     if (typeof entry.path !== 'string' || typeof entry.content !== 'string') throw new Error('Model patch files need path and content strings')
     return { path: entry.path, content: entry.content }
   })
-  return { files, diagnosis: typeof value.diagnosis === 'string' ? value.diagnosis : undefined, skillContent: typeof value.skillContent === 'string' ? value.skillContent.slice(0, 64000) : undefined }
+  return { files, diagnosis: typeof value.diagnosis === 'string' ? value.diagnosis : undefined, skillContent: typeof value.skillContent === 'string' ? value.skillContent : undefined }
 }
 

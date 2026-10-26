@@ -20,6 +20,8 @@ export default defineConfig({
     },
   },
   server: {
+    port: 3000,
+    host: '0.0.0.0',
     watch: {
       // Runtime output of the sync daemon, and docs. Changes to these silently reloaded the page,
       // which killed the playtest in progress whenever the agent published SKILL.md.

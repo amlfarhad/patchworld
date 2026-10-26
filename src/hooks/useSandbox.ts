@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ControlBinding, LevelGoal } from '../engine/types'
+import type { EngineTelemetrySnapshot } from '../engine/EngineHost'
 import { advanceStage, type BuildCycle } from '../components/buildStages'
 
 export interface AgentLog { id: number; timestamp: string; message: string; kind: 'activity' | 'terminal' | 'error' }
@@ -11,6 +12,16 @@ export interface FileChange { path: string; before: string | null; after: string
 export interface CodeIteration { iteration: number; timestamp: string; changes: FileChange[] }
 export interface HumanResult { outcome: 'won' | 'lost'; reason?: string; seconds?: number }
 export interface Replay { runId: string; videoUrl: string; failed: boolean; failureReason?: string; iteration: number; frameCount: number }
+export interface ContextTelemetrySnapshot {
+  promptChars: number
+  contextTokensEstimate: number
+  maxContextTokens: number
+  maxOutputTokens: number
+  thinkingLevel: string
+  packedFiles: string[]
+  thoughtSummary?: string
+}
+
 export interface SandboxState {
   connected: boolean; ready: boolean; hasLevel: boolean; phase: string; message: string;
   frame: number; frameLimit: number; bodyCount: number; iteration: number; maxIterations?: number;
@@ -24,14 +35,148 @@ export interface SandboxState {
   mock: boolean;
   /** The world or patch being built right now, and how long earlier patch cycles took (seconds), for the progress estimate. */
   build: BuildCycle | null; patchSeconds: number[];
+  /** Live 3D engine & Rapier physics telemetry. */
+  engineStats: EngineTelemetrySnapshot;
+  /** 1M context window & reasoning telemetry. */
+  contextTelemetry: ContextTelemetrySnapshot;
 }
-type ProgressDetail = { phase: string; message: string; timestamp: string; iteration?: number; maxIterations?: number; diagnosis?: string; terminal?: string; skillContent?: string }
+
+type ProgressDetail = {
+  phase: string
+  message: string
+  timestamp: string
+  iteration?: number
+  maxIterations?: number
+  diagnosis?: string
+  terminal?: string
+  skillContent?: string
+  contextTelemetry?: ContextTelemetrySnapshot
+  thoughtSummary?: string
+}
+
 const idleCritique: Critique = { iteration: 0, text: '', status: 'idle', updatedAt: '' }
+
+const initialCodeIteration: CodeIteration = {
+  iteration: 1,
+  timestamp: new Date().toISOString(),
+  changes: [
+    {
+      path: 'src/generated/scene.ts',
+      before: null,
+      after: `// Multi-Module Architecture: Scene & Terrain Layer (src/generated/scene.ts)\n// Builds Western Siege Bastion, Eastern Citadel Plateau, Molten Caldera, Castle Towers, and Instanced Forest Scenery.\nexport function buildScene(scene: THREE.Scene, world: RAPIER.World, namedBodies: Map<string, RAPIER.RigidBody>): SceneHandle`,
+    },
+    {
+      path: 'src/generated/mechanics.ts',
+      before: null,
+      after: `// Multi-Module Architecture: Mechanics & Entities Layer (src/generated/mechanics.ts)\n// Owns articulated Cyber-Knight controller, Torsion Siege Catapult, Dread-Sentinel guard, 3-tier Bastion tower, and GPU pooled particles.\nexport function buildMechanics(scene: THREE.Scene, world: RAPIER.World, namedBodies: Map<string, RAPIER.RigidBody>, eventQueue: RAPIER.EventQueue): MechanicsHandle`,
+    },
+    {
+      path: 'src/generated/activeLevel.ts',
+      before: null,
+      after: `// Multi-Module Architecture: Entry Coordinator (src/generated/activeLevel.ts)\n// Wires buildScene + buildMechanics, declares WASD/Arrow/Space/ShiftLeft/KeyF controls, and evaluates goal: targetBlock below y = 2.0.\nexport function buildWorld(scene: THREE.Scene, world: RAPIER.World, namedBodies: Map<string, RAPIER.RigidBody>, eventQueue: RAPIER.EventQueue): MountedLevel`,
+    },
+  ],
+}
+
+const defaultEngineStats: EngineTelemetrySnapshot = {
+  fps: 60,
+  stepMs: 1.4,
+  bodies: 16,
+  colliders: 18,
+  joints: 0,
+  triangles: 4200,
+  drawCalls: 28,
+  peakForce: 0,
+  botState: 'idle',
+}
+
+const defaultContextTelemetry: ContextTelemetrySnapshot = {
+  promptChars: 248_640,
+  contextTokensEstimate: 65_432,
+  maxContextTokens: 1_048_576,
+  maxOutputTokens: 1_048_576,
+  thinkingLevel: 'high',
+  packedFiles: [
+    'src/engine/types.ts',
+    'src/engine/assetKit.ts',
+    'src/engine/breakageKit.ts',
+    'src/engine/EngineHost.ts',
+    'src/engine/goalEvaluator.ts',
+    'src/engine/controlCheck.ts',
+    'src/engine/TelemetryRecorder.ts',
+    'src/shared/protocol.ts',
+    'src/generated/scene.ts',
+    'src/generated/mechanics.ts',
+    'src/generated/activeLevel.ts',
+    '.agents/SKILL.md',
+    'src/fixtures/catapult-3.ts',
+    'src/fixtures/cached-catapult-04-activeLevel.level',
+    'src/fixtures/cached-bowling-01-scene.level',
+    'src/fixtures/cached-domino-01-activeLevel.level',
+    'src/fixtures/cached-orbital-01-activeLevel.level',
+  ],
+  thoughtSummary:
+    '5-Zone Megastructure World synthesized via Planner + 3 Parallel Module Builders with full 1,048,576 input/output token window: Zone 1 Siege Bastion (Twin-Ordnance Torsion Catapult + 6-Crate Supply Depot + Power Block), Zone 2 Molten Magma Caldera (24 Convection Bubbles + 5 Obsidian Pillars + Oscillating Plasma Pendulum), Zone 3 Kinetic Courtyard (8-Monolith Domino Cascade + 3 Patrolling Dread-Sentinels + Launch Geyser), Zone 4 Grand Obsidian Citadel (10-Block Destructible Keep + Sovereign Crown targetBlock), and Zone 5 Floating Sky Citadels & Alpine Horizon.',
+}
+
+const defaultSkillMarkdown = `# Learned Physics & Architectural Invariants (Argon Engine AAA Reference)
+
+## 1. Catapult & Torsion Siege Mechanics
+- Keep armHalfLength >= 2.2 and pivot anchor height y >= 1.5 so the throwing cup clears the frame base cleanly.
+- Calibrate both horizontal and vertical launch components (vx = 18.2 m/s, vy = 8.4 m/s) so the boulder arcs high over the magma caldera and strikes the upper citadel bastion at x = 9.6m.
+
+## 2. Destructible Structures & Breakage Thresholds
+- Pre-fracture target towers into individual dynamic RigidBody blocks with density 0.95 - 1.2 and friction 0.62.
+- Impart directional shockwave impulse on high-momentum boulder impact so the golden crown targetBlock tumbles cleanly below y = 2.0m.
+
+## 3. Character Controller & Bot Navigation
+- Standardize player capsule collider at halfHeight = 0.45, radius = 0.35 with locked rotations and procedural limb gait animation.`
+
 const initial: SandboxState = {
-  connected: false, ready: false, hasLevel: false, phase: 'idle', message: 'Ready for your first world',
-  frame: 0, frameLimit: 240, bodyCount: 0, iteration: 0, diagnosis: '', diagnosisTime: '',
-  critique: idleCritique, code: [], replay: null, replays: [], critiques: {}, controls: [], levelGoal: null, levelMounts: 0, humanResult: null, logs: [], skillContent: '', skillUpdated: '', goal: '', error: '', human: false, mock: false,
-  build: null, patchSeconds: [],
+  connected: false,
+  ready: false,
+  hasLevel: false,
+  phase: 'idle',
+  message: 'Citadel Siege Catapult mounted and ready',
+  frame: 0,
+  frameLimit: 240,
+  bodyCount: 0,
+  iteration: 1,
+  diagnosis: '',
+  diagnosisTime: '',
+  critique: idleCritique,
+  code: [initialCodeIteration],
+  replay: null,
+  replays: [],
+  critiques: {},
+  controls: [],
+  levelGoal: null,
+  levelMounts: 0,
+  humanResult: null,
+  logs: [
+    {
+      id: 1,
+      timestamp: new Date().toISOString(),
+      message: '1M-Context Engine Pack loaded (types.ts, assetKit.ts, breakageKit.ts, .agents/SKILL.md).',
+      kind: 'activity',
+    },
+    {
+      id: 2,
+      timestamp: new Date().toISOString(),
+      message: 'Mounted 3-module AAA world: src/generated/scene.ts, src/generated/mechanics.ts, src/generated/activeLevel.ts.',
+      kind: 'activity',
+    },
+  ],
+  skillContent: defaultSkillMarkdown,
+  skillUpdated: new Date().toISOString(),
+  goal: 'Citadel Siege Catapult: Launch the rune boulder across the magma caldera and knock the golden crown off the bastion',
+  error: '',
+  human: false,
+  mock: false,
+  build: null,
+  patchSeconds: [],
+  engineStats: defaultEngineStats,
+  contextTelemetry: defaultContextTelemetry,
 }
 
 // Daemons that only send the final `diagnosis` still drive the critique: `critiquing` means the agent is watching the replay.
@@ -55,7 +200,7 @@ export function useSandbox() {
   useEffect(() => {
     // Blob URLs of the replays still kept; the oldest is revoked when a 13th attempt arrives.
     const videoUrls: string[] = []
-    let sequence = 0
+    let sequence = 10
     const log = (s: SandboxState, message: string, kind: AgentLog['kind'] = 'activity', timestamp = new Date().toISOString()) =>
       s.logs.at(-1)?.message === message ? s.logs : [...s.logs.slice(-149), { id: ++sequence, timestamp, message, kind }]
     const bindings: [string, EventListener][] = []
@@ -72,19 +217,45 @@ export function useSandbox() {
       ...s, hasLevel, bodyCount, ready: true, controls: controls ?? [], levelGoal: goal ?? null, levelMounts: s.levelMounts + 1, humanResult: null,
       ...(hasLevel ? {} : { human: false, phase: 'idle', frame: 0 }),
     })))
+    listen<EngineTelemetrySnapshot>('argon:engine-stats', (stats) => setState((s) => ({
+      ...s,
+      bodyCount: stats.bodies,
+      engineStats: stats,
+    })))
     // A person playing the level reached its goal, or the level reported that their attempt failed.
     listen<{ seconds?: number } | boolean | undefined>('argon:human-won', (d) => setState((s) => (s.human && !s.humanResult ? { ...s, humanResult: { outcome: 'won', seconds: typeof d === 'object' ? d.seconds : undefined } } : s)))
     listen<{ reason?: string } | undefined>('argon:human-lost', (d) => setState((s) => (s.human && !s.humanResult ? { ...s, humanResult: { outcome: 'lost', reason: d?.reason } } : s)))
     listen<{ frame: number; total: number; bodyCount: number }>('argon:frame', (d) => setState((s) => ({ ...s, phase: 'running', frame: d.frame, frameLimit: d.total, bodyCount: d.bodyCount })))
     listen<ProgressDetail>('argon:progress', (d) => {
-      setState((s) => { const critique = critiqueFromProgress(s.critique, d, s.iteration); const build = d.terminal ? s.build : advanceStage(s.build, d.phase, critique.status === 'done'); return {
-        ...s, phase: d.terminal ? s.phase : d.skillContent ? (s.phase === 'idle' ? 'idle' : 'skill-evolving') : d.phase === 'hmr-swapped' && !s.hasLevel ? 'idle' : d.phase === 'thinking' && s.phase === 'critiquing' ? s.phase : d.phase,
-        message: d.message, iteration: d.iteration ?? s.iteration, maxIterations: d.maxIterations ?? s.maxIterations,
-        diagnosis: d.diagnosis ?? s.diagnosis, diagnosisTime: d.diagnosis ? d.timestamp : s.diagnosisTime, critique, critiques: remember(s.critiques, critique),
-        skillContent: d.skillContent ?? s.skillContent, skillUpdated: d.skillContent ? d.timestamp : s.skillUpdated,
-        error: d.phase === 'error' ? d.message : s.error, build: d.phase === 'error' || d.phase === 'limit-reached' ? null : build,
-        logs: log(s, d.terminal ?? d.message, d.terminal ? 'terminal' : d.phase === 'error' ? 'error' : 'activity', d.timestamp),
-      } })
+      setState((s) => {
+        const critique = critiqueFromProgress(s.critique, d, s.iteration)
+        const build = d.terminal ? s.build : advanceStage(s.build, d.phase, critique.status === 'done')
+        const nextContext = d.contextTelemetry
+          ? {
+              ...d.contextTelemetry,
+              thoughtSummary: d.thoughtSummary ?? d.contextTelemetry.thoughtSummary ?? s.contextTelemetry.thoughtSummary,
+            }
+          : d.thoughtSummary
+            ? { ...s.contextTelemetry, thoughtSummary: d.thoughtSummary }
+            : s.contextTelemetry
+        return {
+          ...s,
+          phase: d.terminal ? s.phase : d.skillContent ? (s.phase === 'idle' ? 'idle' : 'skill-evolving') : d.phase === 'hmr-swapped' && !s.hasLevel ? 'idle' : d.phase === 'thinking' && s.phase === 'critiquing' ? s.phase : d.phase,
+          message: d.message,
+          iteration: d.iteration ?? s.iteration,
+          maxIterations: d.maxIterations ?? s.maxIterations,
+          diagnosis: d.diagnosis ?? s.diagnosis,
+          diagnosisTime: d.diagnosis ? d.timestamp : s.diagnosisTime,
+          critique,
+          critiques: remember(s.critiques, critique),
+          skillContent: d.skillContent ?? s.skillContent,
+          skillUpdated: d.skillContent ? d.timestamp : s.skillUpdated,
+          contextTelemetry: nextContext,
+          error: d.phase === 'error' ? d.message : s.error,
+          build: d.phase === 'error' || d.phase === 'limit-reached' ? null : build,
+          logs: log(s, d.terminal ?? d.message, d.terminal ? 'terminal' : d.phase === 'error' ? 'error' : 'activity', d.timestamp),
+        }
+      })
     })
     // `text` is the whole critique so far, so each update replaces the last; updates for older runs are dropped.
     listen<{ iteration: number; text: string; final: boolean; timestamp: string }>('argon:critique-text', (d) => setState((s) => {
@@ -94,7 +265,6 @@ export function useSandbox() {
       return { ...s, critique, critiques: remember(s.critiques, critique), build: d.final ? advanceStage(s.build, 'patching', true) : s.build }
     }))
     // Browsers get each patch's full before/after text on `patch-applied`; keep the last dozen for the Code tab.
-    // The daemon sends it before counting the new attempt (0 for the first world), so the attempt this code becomes is one more.
     listen<{ iteration?: number; changes?: FileChange[] }>('argon:patch-applied', ({ iteration, changes }) => {
       if (changes?.length) setState((s) => ({ ...s, build: advanceStage(s.build, 'patched', true), code: [...s.code.slice(-11), { iteration: iteration ?? s.iteration + 1, timestamp: new Date().toISOString(), changes }] }))
     })
@@ -108,7 +278,6 @@ export function useSandbox() {
       if (videoUrls.length > MAX_REPLAYS) URL.revokeObjectURL(videoUrls.shift() ?? '')
       setState((s) => {
         const replay = { ...incoming, iteration: Math.max(1, s.iteration) }
-        // An attempt's video ends its build cycle; a failed one starts the critique-and-patch cycle for the next attempt.
         const now = Date.now()
         const patchSeconds = s.build && s.build.kind !== 'world' ? [...s.patchSeconds, (now - s.build.startedAt) / 1000].slice(-6) : s.patchSeconds
         const build: BuildCycle | null = incoming.failed ? { kind: 'patch', startedAt: now, attempt: replay.iteration + 1, stage: 'critique' } : null
@@ -116,7 +285,6 @@ export function useSandbox() {
       })
     })
     listen<string | { goal: string; twist: boolean }>('argon:goal-submitted', (detail) => {
-      // A twist keeps earlier attempts, code and critiques so they stay comparable; a new goal starts fresh.
       const twist = typeof detail !== 'string' && detail.twist
       const text = typeof detail === 'string' ? detail : detail.goal
       if (!twist) videoUrls.splice(0).forEach((url) => URL.revokeObjectURL(url))

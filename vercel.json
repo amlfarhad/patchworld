@@ -6,7 +6,7 @@
   "functions": {
     "api/argon.ts": {
       "maxDuration": 300,
-      "includeFiles": "{src/engine/**,src/generated/**,tsconfig.app.json,node_modules/@types/**,node_modules/@dimforge/rapier3d-compat/**,node_modules/typescript/lib/*.d.ts}"
+      "includeFiles": "{.agents/**,src/engine/**,src/generated/**,src/fixtures/**,src/shared/**,tsconfig.app.json,node_modules/@types/**,node_modules/@dimforge/rapier3d-compat/**,node_modules/typescript/lib/*.d.ts}"
     }
   }
 }

@@ -6,13 +6,17 @@ import test from 'node:test'
 import {
   ArgonOrchestrator,
   BUILDER_FILE_PATHS,
+  MAX_CONTEXT_WINDOW_TOKENS,
   buildCritiquePrompt,
+  buildEngineContextPack,
   buildModuleBuilderPrompt,
   buildPatchPrompt,
   buildWorldGenerationPrompt,
   buildWorldPlanPrompt,
+  createContextTelemetry,
   createCritiqueTextMessage,
   extractInteractionText,
+  extractInteractionThoughts,
   filterChangedFiles,
   identifyFailingFiles,
   levelContract,
@@ -406,7 +410,7 @@ test('generateSingleCallWorld respects ARGON_WORLD_THINKING and generateInitialW
     assert.equal(capturedParams?.response_mime_type, 'application/json')
     assert.deepEqual(capturedParams?.response_format, patchResponseSchema)
     assert.deepEqual(capturedParams?.generation_config, {
-      max_output_tokens: 65_536,
+      max_output_tokens: 1_048_576,
       thinking_level: 'medium',
     })
     assert.ok(String(capturedParams?.input).includes('Use counterweight density >= 3.0.'))
@@ -608,4 +612,30 @@ test('buildCritiquePrompt and buildPatchPrompt audit declared controls and objec
   assert.ok(patchPrompt.includes('event.code'))
   assert.ok(patchPrompt.includes('stepBotAndRules exercise the main mechanics'))
 })
+
+test('1M context window engine source packing and thought extraction populate ContextTelemetry', () => {
+  const pack = buildEngineContextPack()
+  assert.ok(pack.files.includes('src/engine/types.ts'))
+  assert.ok(pack.files.includes('src/engine/assetKit.ts'))
+  assert.ok(pack.files.includes('src/engine/breakageKit.ts'))
+  assert.ok(pack.text.includes('createCastleTower'))
+  assert.ok(pack.text.includes('createPooledParticles'))
+
+  const prompt = buildWorldGenerationPrompt('Siege catapult castle')
+  const telemetry = createContextTelemetry(prompt, 'high', 65_536, 'Calculated parabolic arc for boulder launch.')
+  assert.equal(telemetry.maxContextTokens, MAX_CONTEXT_WINDOW_TOKENS)
+  assert.equal(telemetry.maxContextTokens, 1_048_576)
+  assert.ok(telemetry.contextTokensEstimate > 1_000)
+  assert.equal(telemetry.thinkingLevel, 'high')
+  assert.equal(telemetry.thoughtSummary, 'Calculated parabolic arc for boulder launch.')
+
+  const thoughts = extractInteractionThoughts({
+    steps: [
+      { type: 'thought', content: [{ type: 'text', text: 'First, compute torque on the catapult arm.' }] },
+      { type: 'model_output', content: [{ type: 'thought', text: 'Second, set breakForce = 28 on tower mortar.' }] },
+    ],
+  })
+  assert.equal(thoughts, 'First, compute torque on the catapult arm.\n\nSecond, set breakForce = 28 on tower mortar.')
+})
+
 

@@ -44,18 +44,42 @@ export class AutonomousLoop {
   connect(): void {
     if (this.disposed || this.socket || typeof WebSocket === 'undefined') return
     // Hosted builds have no local sync daemon; the loop runs in the page instead.
-    const socket = isHosted ? new InPageSocket() as unknown as WebSocket : new WebSocket(this.socketUrl)
-    socket.binaryType = 'arraybuffer'
-    socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'register', role: 'browser' })))
-    socket.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => this.handleMessage(event.data))
-    socket.addEventListener('error', () => this.setState('error'))
-    socket.addEventListener('close', () => {
-      if (this.disposed) return
+    if (isHosted) {
+      this.attachSocket(new InPageSocket() as unknown as WebSocket)
+      return
+    }
+    const ws = new WebSocket(this.socketUrl)
+    let opened = false
+    ws.binaryType = 'arraybuffer'
+    ws.addEventListener('open', () => {
+      opened = true
+      ws.send(JSON.stringify({ type: 'register', role: 'browser' }))
+    })
+    ws.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => this.handleMessage(event.data))
+    ws.addEventListener('error', () => {
+      if (!opened && !this.disposed) {
+        // Fallback to InPageSocket when local ws://127.0.0.1:4174 daemon is not running
+        this.socket = null
+        this.attachSocket(new InPageSocket() as unknown as WebSocket)
+      } else {
+        this.setState('error')
+      }
+    })
+    ws.addEventListener('close', () => {
+      if (this.disposed || this.socket !== ws) return
       window.dispatchEvent(new CustomEvent('argon:connection', { detail: false }))
       if (this.state === 'running' || this.state === 'uploading') this.setState('error')
       this.socket = null
       this.reconnectTimer = window.setTimeout(() => this.connect(), 1_000)
     })
+    this.socket = ws
+  }
+
+  private attachSocket(socket: WebSocket): void {
+    socket.binaryType = 'arraybuffer'
+    socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'register', role: 'browser' })))
+    socket.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => this.handleMessage(event.data))
+    socket.addEventListener('error', () => this.setState('error'))
     this.socket = socket
   }
 
@@ -78,6 +102,7 @@ export class AutonomousLoop {
 
   onLevelMounted(): void {
     this.humanLossReported = false
+    this.humanTicks = 0
     this.unreportedMount = !this.send({ type: 'level-mounted' })
     if (this.enabled && this.state === 'awaiting-patch') this.beginRun()
     else if (this.enabled && this.state === 'uploading') this.mountedWhileUploading = true
@@ -130,7 +155,7 @@ export class AutonomousLoop {
   stepBotAndRules(level: MountedLevel | null): StepResult | null {
     if (!level) return null
     if (this.isHumanControlled) return level.stepHumanAndRules?.(++this.humanTicks, this.humanTicks / 60) ?? null
-    if (this.state !== 'running') return null
+    if (this.state !== 'running') return level.stepBotAndRules(++this.humanTicks, this.humanTicks / 60)
     return level.stepBotAndRules(this.runTicks + 1, this.runTicks / 60)
   }
 

@@ -3,11 +3,27 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import RAPIER from '@dimforge/rapier3d-compat'
 import { AutonomousLoop } from './AutonomousLoop'
+import { getProceduralNoiseTexture } from './assetKit'
 import { checkDeclaredControls } from './controlCheck'
 import { evaluateLevelGoal } from './goalEvaluator'
 import type { ContactSnapshot, ControlBinding, GeneratedLevelModule, MountedLevel, StepResult } from './types'
 
 const rapierReady = RAPIER.init()
+
+export type CameraDirectorMode = 'overview' | 'follow' | 'cinematic' | 'citadel'
+
+export interface EngineTelemetrySnapshot {
+  fps: number
+  stepMs: number
+  bodies: number
+  colliders: number
+  joints: number
+  triangles: number
+  drawCalls: number
+  peakForce: number
+  botState: string
+  cameraMode?: CameraDirectorMode
+}
 
 export class EngineHost {
   readonly scene = new THREE.Scene()
@@ -16,6 +32,7 @@ export class EngineHost {
   readonly controls: OrbitControls
   readonly namedBodies = new Map<string, RAPIER.RigidBody>()
   readonly autonomousLoop: AutonomousLoop
+  readonly isSoftwareGl: boolean
 
   private readonly canvas: HTMLCanvasElement
   private currentModule: GeneratedLevelModule | null = null
@@ -27,9 +44,17 @@ export class EngineHost {
   private envRenderTarget: THREE.WebGLRenderTarget | null = null
   private unsubscribeLoopState: (() => void) | null = null
   private animationFrame = 0
+  private paceTimer = 0
   private frameIndex = 0
   private accumulator = 0
   private lastFrameTime = 0
+  private lastStatsEmitTime = 0
+  private smoothedFps = 60
+  private lastStepMs = 0.4
+  private peakForce = 0
+  private latestBotState = 'ready'
+  private cameraTrauma = 0
+  private cameraMode: CameraDirectorMode = 'overview'
   private disposed = false
   private viewportWidth = 0
   private viewportHeight = 0
@@ -39,20 +64,35 @@ export class EngineHost {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
     this.autonomousLoop = new AutonomousLoop(canvas, undefined, () => this.checkControls())
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: false,
+      powerPreference: 'high-performance',
+    })
+
+    const gl = this.renderer.getContext()
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+    const rendererInfo = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : ''
+    this.isSoftwareGl = /SwiftShader|llvmpipe|Software/i.test(rendererInfo)
+
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0xeaf3e9)
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.05
-    this.renderer.shadowMap.enabled = true
+    this.renderer.toneMappingExposure = 1.08
+    this.renderer.shadowMap.enabled = !this.isSoftwareGl
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer)
     const roomEnvironment = new RoomEnvironment()
     this.envRenderTarget = pmremGenerator.fromScene(roomEnvironment, 0.04)
     this.scene.environment = this.envRenderTarget.texture
     roomEnvironment.dispose()
     pmremGenerator.dispose()
+
+    this.scene.fog = new THREE.FogExp2(0xe4efe3, 0.0038)
+
     this.camera.position.set(0, 3, 8)
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
@@ -66,6 +106,31 @@ export class EngineHost {
     this.setupDefaultStage()
     this.resize()
     window.addEventListener('resize', this.resize)
+    window.addEventListener('argon:camera-mode', this.handleCameraModeEvent as EventListener)
+  }
+
+  private readonly handleCameraModeEvent = (event: CustomEvent<CameraDirectorMode>): void => {
+    const mode = event.detail
+    if (mode === 'overview' || mode === 'follow' || mode === 'cinematic' || mode === 'citadel') {
+      this.setCameraMode(mode)
+    }
+  }
+
+  public setCameraMode(mode: CameraDirectorMode): void {
+    this.cameraMode = mode
+    if (mode === 'overview') {
+      this.frameLevelBounds()
+    } else if (mode === 'citadel') {
+      const targetBody = this.namedBodies.get('targetBlock') ?? this.namedBodies.get('tower-b5')
+      const focus = targetBody
+        ? new THREE.Vector3(targetBody.translation().x, 4.2, targetBody.translation().z)
+        : new THREE.Vector3(18, 4.2, 0)
+      this.controls.target.copy(focus)
+      this.camera.position.set(focus.x - 11, focus.y + 7.5, focus.z + 16)
+      this.camera.lookAt(focus)
+      this.controls.update()
+    }
+    this.emitEngineTelemetry(performance.now(), true)
   }
 
   async initialize(levelModule: GeneratedLevelModule): Promise<void> {
@@ -76,7 +141,7 @@ export class EngineHost {
     // cannot keep the page offline after a reload.
     this.autonomousLoop.connect()
     this.lastFrameTime = performance.now()
-    this.animationFrame = window.requestAnimationFrame(this.tick)
+    this.scheduleNextFrame()
     await this.mountLevel(levelModule)
   }
 
@@ -134,8 +199,14 @@ export class EngineHost {
     nextBodies.forEach((body, name) => this.namedBodies.set(name, body))
     this.frameIndex = 0
     this.accumulator = 0
+    this.peakForce = 0
+    this.cameraTrauma = 0
+    this.latestBotState = 'mounted'
     this.currentModule = levelModule
     this.frameLevelBounds()
+    if (!this.isSoftwareGl) {
+      this.renderer.compile(this.scene, this.camera)
+    }
     window.dispatchEvent(
       new CustomEvent('argon:level-mounted', {
         detail: {
@@ -146,6 +217,7 @@ export class EngineHost {
         },
       }),
     )
+    this.emitEngineTelemetry(performance.now(), true)
     this.autonomousLoop.onLevelMounted()
   }
 
@@ -172,7 +244,9 @@ export class EngineHost {
     if (this.disposed) return
     this.disposed = true
     window.cancelAnimationFrame(this.animationFrame)
+    window.clearTimeout(this.paceTimer)
     window.removeEventListener('resize', this.resize)
+    window.removeEventListener('argon:camera-mode', this.handleCameraModeEvent as EventListener)
     this.unsubscribeLoopState?.()
     this.unsubscribeLoopState = null
     this.controls.dispose()
@@ -190,19 +264,33 @@ export class EngineHost {
     this.renderer.dispose()
   }
 
+  private scheduleNextFrame(): void {
+    if (this.disposed) return
+    if (this.isSoftwareGl) {
+      this.paceTimer = window.setTimeout(() => {
+        if (!this.disposed) {
+          this.animationFrame = window.requestAnimationFrame(this.tick)
+        }
+      }, 16)
+    } else {
+      this.animationFrame = window.requestAnimationFrame(this.tick)
+    }
+  }
+
   private setupDefaultStage(): void {
     const stage = new THREE.Group()
     stage.name = 'default-stage'
 
-    // Sky dome with smooth gradient
+    // Sky dome with smooth gradient and atmospheric scattering halo
     const skyGeo = new THREE.SphereGeometry(240, 32, 16)
     const skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        topColor: { value: new THREE.Color(0x9bd3f8) },
+        topColor: { value: new THREE.Color(0x88c9f9) },
         horizonColor: { value: new THREE.Color(0xeaf3e9) },
-        bottomColor: { value: new THREE.Color(0xd2e4d0) },
+        bottomColor: { value: new THREE.Color(0xcde2cb) },
+        sunDir: { value: new THREE.Vector3(18, 32, 20).normalize() },
       },
       vertexShader: `
         varying vec3 vWorldPos;
@@ -216,12 +304,16 @@ export class EngineHost {
         uniform vec3 topColor;
         uniform vec3 horizonColor;
         uniform vec3 bottomColor;
+        uniform vec3 sunDir;
         varying vec3 vWorldPos;
         void main() {
-          float h = normalize(vWorldPos).y;
+          vec3 dir = normalize(vWorldPos);
+          float h = dir.y;
           vec3 col = h >= 0.0
-            ? mix(horizonColor, topColor, pow(clamp(h, 0.0, 1.0), 0.65))
+            ? mix(horizonColor, topColor, pow(clamp(h, 0.0, 1.0), 0.62))
             : mix(horizonColor, bottomColor, pow(clamp(-h, 0.0, 1.0), 0.65));
+          float sunGlow = pow(max(dot(dir, sunDir), 0.0), 24.0);
+          col += vec3(1.0, 0.94, 0.78) * sunGlow * 0.28;
           gl_FragColor = vec4(col, 1.0);
         }
       `,
@@ -230,13 +322,13 @@ export class EngineHost {
     skyDome.name = 'default-sky'
     stage.add(skyDome)
 
-    // Hemisphere + Directional light with shadows
-    const hemiLight = new THREE.HemisphereLight(0xdceeff, 0x3b4d3f, 1.4)
+    // 3-Point Studio Lighting: Hemisphere Fill + Warm Key Light + Cool Rim Backlight
+    const hemiLight = new THREE.HemisphereLight(0xdceeff, 0x3b4d3f, 1.42)
     stage.add(hemiLight)
 
-    const sunLight = new THREE.DirectionalLight(0xfff7e8, 2.2)
+    const sunLight = new THREE.DirectionalLight(0xfff6e5, 2.35)
     sunLight.position.set(18, 32, 20)
-    sunLight.castShadow = true
+    sunLight.castShadow = !this.isSoftwareGl
     sunLight.shadow.mapSize.set(2048, 2048)
     sunLight.shadow.camera.near = 1
     sunLight.shadow.camera.far = 120
@@ -248,12 +340,20 @@ export class EngineHost {
     sunLight.shadow.bias = -0.0005
     stage.add(sunLight)
 
-    // Visual ground slab at y = -0.25 (top surface at y = 0)
+    const rimLight = new THREE.DirectionalLight(0x7dd3fc, 0.85)
+    rimLight.position.set(-22, 18, -24)
+    stage.add(rimLight)
+
+    // Visual ground slab at y = -0.25 (top surface at y = 0) with procedural micro-relief
+    const stoneBump = getProceduralNoiseTexture('stone', 128)
+    stoneBump.repeat.set(18, 18)
     const groundGeo = new THREE.BoxGeometry(120, 0.5, 120)
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0xdbe7d8,
-      roughness: 0.9,
-      metalness: 0.04,
+      roughness: 0.86,
+      metalness: 0.05,
+      bumpMap: stoneBump,
+      bumpScale: 0.012,
     })
     const groundMesh = new THREE.Mesh(groundGeo, groundMat)
     groundMesh.position.set(0, -0.25, 0)
@@ -264,6 +364,36 @@ export class EngineHost {
     const grid = new THREE.GridHelper(120, 60, 0x99b399, 0xc3d6c2)
     grid.position.set(0, 0.004, 0)
     stage.add(grid)
+
+    // Distant procedural mountain range & snow-capped peaks around the horizon
+    const mountainMat = new THREE.MeshStandardMaterial({
+      color: 0x94a89b,
+      roughness: 0.92,
+      metalness: 0.04,
+    })
+    const snowMat = new THREE.MeshStandardMaterial({
+      color: 0xf1f7f0,
+      roughness: 0.65,
+      metalness: 0.05,
+    })
+    const peakCount = 28
+    for (let i = 0; i < peakCount; i++) {
+      const angle = (i / peakCount) * Math.PI * 2
+      const dist = 76 + ((i * 17) % 19)
+      const h = 16 + ((i * 23) % 18)
+      const r = 10 + ((i * 11) % 9)
+      const mx = Math.cos(angle) * dist
+      const mz = Math.sin(angle) * dist
+      const peak = new THREE.Mesh(new THREE.ConeGeometry(r, h, 7), mountainMat)
+      peak.position.set(mx, h * 0.42, mz)
+      peak.rotation.y = i * 0.7
+      stage.add(peak)
+
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.44, h * 0.36, 7), snowMat)
+      cap.position.set(mx, h * 0.73, mz)
+      cap.rotation.y = i * 0.7
+      stage.add(cap)
+    }
 
     this.stageRoot = stage
     this.scene.add(stage)
@@ -283,13 +413,13 @@ export class EngineHost {
     root.traverse((object) => {
       const mesh = object as THREE.Mesh
       if (mesh.isMesh) {
-        mesh.castShadow = true
-        mesh.receiveShadow = true
+        mesh.castShadow = !this.isSoftwareGl
+        mesh.receiveShadow = !this.isSoftwareGl
       }
     })
   }
 
-  private frameLevelBounds(): void {
+  public frameLevelBounds(): void {
     const box = new THREE.Box3()
     if (this.levelRoot && this.levelRoot.children.length > 0) {
       this.levelRoot.updateMatrixWorld(true)
@@ -311,6 +441,10 @@ export class EngineHost {
       return
     }
 
+    // Clamp extreme scatter bounds so camera focuses tightly on the playable arena
+    box.min.max(new THREE.Vector3(-28, -4, -18))
+    box.max.min(new THREE.Vector3(28, 16, 18))
+
     const sphere = new THREE.Sphere()
     box.getBoundingSphere(sphere)
     const center = sphere.center
@@ -318,8 +452,8 @@ export class EngineHost {
     const vFov = THREE.MathUtils.degToRad(this.camera.fov)
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(this.camera.aspect, 0.5))
     const halfFov = Math.min(vFov, hFov) / 2
-    const distance = Math.min(Math.max((radius / Math.sin(halfFov)) * 1.15, 6), 180)
-    const viewDirection = new THREE.Vector3(0.35, 0.55, 1).normalize()
+    const distance = Math.min(Math.max((radius / Math.sin(halfFov)) * 0.88, 6), 56)
+    const viewDirection = new THREE.Vector3(0.24, 0.50, 1).normalize()
 
     this.camera.position.copy(center).addScaledVector(viewDirection, distance)
     this.controls.target.copy(center)
@@ -330,7 +464,7 @@ export class EngineHost {
   private readonly resize = (): void => {
     const width = Math.max(1, this.canvas.clientWidth)
     const height = Math.max(1, this.canvas.clientHeight)
-    const pixelRatio = Math.min(window.devicePixelRatio, 2)
+    const pixelRatio = this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2)
     if (width === this.viewportWidth && height === this.viewportHeight && pixelRatio === this.viewportPixelRatio) return
     this.viewportWidth = width
     this.viewportHeight = height
@@ -343,11 +477,14 @@ export class EngineHost {
 
   private readonly tick = (now: number): void => {
     if (this.disposed) return
-    const delta = Math.min((now - this.lastFrameTime) / 1000, 0.1)
+    const rawDelta = (now - this.lastFrameTime) / 1000
+    const delta = Math.min(Math.max(rawDelta, 0.001), 0.05)
     this.lastFrameTime = now
+    this.smoothedFps = this.smoothedFps * 0.9 + (1 / Math.max(rawDelta, 0.004)) * 0.1
     this.accumulator += delta
 
     while (this.accumulator >= this.fixedStep) {
+      const stepStart = performance.now()
       const nextFrame = this.frameIndex + 1
       let stepResult: StepResult | null = null
       try {
@@ -357,10 +494,18 @@ export class EngineHost {
         stepResult = { botState: 'exception', goalReached: false, failedEarly: failure }
       }
       this.world?.step(this.eventQueue ?? undefined)
+      this.lastStepMs = performance.now() - stepStart
       this.frameIndex = nextFrame
       this.accumulator -= this.fixedStep
       const contacts = this.drainContactEvents()
+      for (const c of contacts) {
+        if (c.totalForce > this.peakForce) this.peakForce = c.totalForce
+        if (c.totalForce > 35) {
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + Math.min(0.45, c.totalForce / 220))
+        }
+      }
       if (stepResult) {
+        this.latestBotState = stepResult.botState
         const engineGoalReached =
           !stepResult.failedEarly &&
           evaluateLevelGoal(this.levelHandle?.goal, this.namedBodies)
@@ -376,11 +521,58 @@ export class EngineHost {
       )
     }
 
-    if (this.controls.enabled) {
+    if (this.cameraMode === 'follow') {
+      const tracked = this.namedBodies.get('player') ?? this.namedBodies.get('boulder')
+      if (tracked) {
+        const tp = tracked.translation()
+        const desiredTarget = new THREE.Vector3(tp.x + 2.5, Math.max(1.8, tp.y + 1.2), tp.z)
+        const desiredCam = new THREE.Vector3(tp.x - 6.5, Math.max(5.5, tp.y + 5.2), tp.z + 13.5)
+        this.controls.target.lerp(desiredTarget, 0.08)
+        this.camera.position.lerp(desiredCam, 0.08)
+        this.camera.lookAt(this.controls.target)
+      }
+    } else if (this.cameraMode === 'cinematic') {
+      const angle = now * 0.00028
+      const radius = 34
+      this.controls.target.lerp(new THREE.Vector3(2, 3.2, 0), 0.05)
+      this.camera.position.set(
+        Math.sin(angle) * radius + 2,
+        14.5 + Math.sin(angle * 2) * 2.5,
+        Math.cos(angle) * radius,
+      )
+      this.camera.lookAt(this.controls.target)
+    } else if (this.controls.enabled) {
       this.controls.update()
     }
+
+    // Apply decaying trauma^2 rotational shake on heavy physics impacts
+    if (this.cameraTrauma > 0.001) {
+      const shake = this.cameraTrauma * this.cameraTrauma * 0.014
+      this.camera.rotation.z += Math.sin(now * 0.045) * shake
+      this.cameraTrauma = Math.max(0, this.cameraTrauma - delta * 2.4)
+    }
+
     this.renderer.render(this.scene, this.camera)
-    this.animationFrame = window.requestAnimationFrame(this.tick)
+    this.emitEngineTelemetry(now, false)
+    this.scheduleNextFrame()
+  }
+
+  private emitEngineTelemetry(now: number, force: boolean): void {
+    if (!force && now - this.lastStatsEmitTime < 250) return
+    this.lastStatsEmitTime = now
+    const detail: EngineTelemetrySnapshot = {
+      fps: Math.min(60, Math.max(1, Math.round(this.smoothedFps))),
+      stepMs: Number(this.lastStepMs.toFixed(2)),
+      bodies: this.namedBodies.size,
+      colliders: this.world?.colliders.len() ?? 0,
+      joints: this.world?.impulseJoints.len() ?? 0,
+      triangles: this.renderer.info.render.triangles,
+      drawCalls: this.renderer.info.render.calls,
+      peakForce: Math.round(this.peakForce),
+      botState: this.latestBotState,
+      cameraMode: this.cameraMode,
+    }
+    window.dispatchEvent(new CustomEvent('argon:engine-stats', { detail }))
   }
 
   private disposeObjectTree(root: THREE.Object3D): void {

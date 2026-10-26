@@ -14,9 +14,11 @@ dist-ssr
 .env
 .env.*
 !.env.example
+!.env.hosted
 # Sync daemon output: playtest videos, recorded runs, the agent's learned SKILL.md
 artifacts/
-.agents/
+.agents/*
+!.agents/SKILL.md
 src/generated/*.tmp
 
 # Local Claude Code launch config
