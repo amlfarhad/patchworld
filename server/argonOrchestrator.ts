@@ -446,7 +446,6 @@ export function buildWorldPlanPrompt(
   options: { useAssetKit?: boolean } = {},
 ): string {
   const useAssetKit = options.useAssetKit ?? isAssetKitAvailable()
-  const enginePack = buildEngineContextPack()
   const sections = [
     `Plan a 3-file 3D physics level for this goal: ${goal}`,
     'Return ONLY a JSON specification matching the schema (no TypeScript or code):',
@@ -456,12 +455,9 @@ export function buildWorldPlanPrompt(
     '- goal: declarative LevelGoal referencing the target body name in namedBodies.',
     '- fileOwnership: what src/generated/scene.ts (terrain, scenery, models), src/generated/mechanics.ts (player controller, enemies, pickups, interactions), and src/generated/activeLevel.ts (imports the other two, bot, goal, controls, MountedLevel) each own.',
     useAssetKit
-      ? "Tell the builders in fileOwnership to import models and gameplay helpers from '../engine/assetKit' (createCharacter, createEnemy, createTree, createRock, createCrate, createCoin, createItemBlock, createGoalFlag, createPlatformTile, scatter, createBodyWithCollider, createPlayerController, collectOnce, hitFromBelow) instead of building everything from boxes."
+      ? `Tell the builders in fileOwnership to import models and gameplay helpers from '../engine/assetKit' (createCharacter, createEnemy, createTree, createRock, createCrate, createCoin, createItemBlock, createGoalFlag, createCastleTower, createPlatformTile, createPooledParticles, animateCharacterGroup, createPBRMaterial, scatter, createBodyWithCollider, createPlayerController, collectOnce, hitFromBelow) instead of building everything from boxes.\n\n${assetKitGuidance.trim()}`
       : "When '../engine/assetKit' is available, builders import models and helpers from '../engine/assetKit' instead of building everything from boxes.",
   ]
-  if (useAssetKit && enginePack.text) {
-    sections.push(enginePack.text)
-  }
   if (skillMarkdown.trim()) {
     sections.push(`Learned physics invariants (.agents/SKILL.md):\n${skillMarkdown.trim()}`)
   }
@@ -930,8 +926,12 @@ export class ArgonOrchestrator {
           model,
           background: true,
           input: planPrompt,
-          response_mime_type: 'application/json',
-          ...(attempt === 1 ? { response_format: worldPlanSchema } : {}),
+          ...(attempt < 3
+            ? {
+                response_mime_type: 'application/json',
+                response_format: worldPlanSchema,
+              }
+            : {}),
           generation_config: {
             max_output_tokens: defaultWorldMaxOutputTokens,
             thinking_level: 'low',
@@ -939,7 +939,7 @@ export class ArgonOrchestrator {
           system_instruction: 'You are the fast level planner for the Argon 3D physics engine. Return only a valid JSON specification with no code.',
         })
         interactionKinds.set(interaction.id, 'model')
-        const completed = await this.waitForInteraction(interaction.id, 'World planner')
+        const completed = await this.waitForInteraction(interaction.id, 'World planner', 90_000)
         const spec = parseWorldPlan(extractInteractionText(completed))
         const thoughtSummary = extractInteractionThoughts(completed) || undefined
         return { spec, interactionId: interaction.id, thoughtSummary, prompt: planPrompt }
@@ -970,8 +970,12 @@ export class ArgonOrchestrator {
           model,
           background: true,
           input: builderPrompt,
-          response_mime_type: 'application/json',
-          ...(attempt < 3 ? { response_format: patchResponseSchema } : {}),
+          ...(attempt < 3
+            ? {
+                response_mime_type: 'application/json',
+                response_format: patchResponseSchema,
+              }
+            : {}),
           generation_config: {
             max_output_tokens: defaultWorldMaxOutputTokens,
             thinking_level: 'low',
