@@ -53,7 +53,6 @@ export class EngineHost {
   private lastStepMs = 0.4
   private peakForce = 0
   private latestBotState = 'ready'
-  private cameraTrauma = 0
   private cameraMode: CameraDirectorMode = 'overview'
   private disposed = false
   private viewportWidth = 0
@@ -200,7 +199,6 @@ export class EngineHost {
     this.frameIndex = 0
     this.accumulator = 0
     this.peakForce = 0
-    this.cameraTrauma = 0
     this.latestBotState = 'mounted'
     this.currentModule = levelModule
     this.frameLevelBounds()
@@ -500,9 +498,6 @@ export class EngineHost {
       const contacts = this.drainContactEvents()
       for (const c of contacts) {
         if (c.totalForce > this.peakForce) this.peakForce = c.totalForce
-        if (c.totalForce > 35) {
-          this.cameraTrauma = Math.min(1, this.cameraTrauma + Math.min(0.45, c.totalForce / 220))
-        }
       }
       if (stepResult) {
         this.latestBotState = stepResult.botState
@@ -543,13 +538,6 @@ export class EngineHost {
       this.camera.lookAt(this.controls.target)
     } else if (this.controls.enabled) {
       this.controls.update()
-    }
-
-    // Apply decaying trauma^2 rotational shake on heavy physics impacts
-    if (this.cameraTrauma > 0.001) {
-      const shake = this.cameraTrauma * this.cameraTrauma * 0.014
-      this.camera.rotation.z += Math.sin(now * 0.045) * shake
-      this.cameraTrauma = Math.max(0, this.cameraTrauma - delta * 2.4)
     }
 
     this.renderer.render(this.scene, this.camera)
